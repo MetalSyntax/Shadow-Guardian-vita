@@ -29,13 +29,10 @@ In order to properly install the game, you'll need to extract the data from the 
 
 ## Controls
 
-- **Left Analog / D-Pad** - Movement
-- **Right Analog** - Camera
-- **Cross/Square/Triangle/Circle** - Action Buttons
-- **L/R Triggers** - Aim/Shoot
-- **Start / Circle** - Pause / Back
-- **Select** - Menu
 - **Touch Screen** - Original Touch Controls
+- **Circle** - Pause / Menu
+
+*(Note: Physical buttons such as Analog sticks, D-Pad, Triggers, and other action buttons are not properly mapped yet and will be implemented in a future update.)*
 
 ## Build Instructions (For Developers)
 
