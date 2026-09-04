@@ -1,0 +1,60 @@
+# macOS metadata
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# Android APK/ZIP originales y extracción -- nunca commitear el juego (DMCA)
+*.apk
+*.zip
+/shadowguardian_extract/
+
+# Java decompilado con jadx (derivado, regenerable: jadx -d decompiled/apk_jadx "Shadow-Guardian-HD-v1-0-1-UK-RU.apk")
+/decompiled/apk_jadx/
+
+# Pseudo-C decompilado del/los .so (derivado, regenerable con devrvk/so-decompiler)
+/decompiled/*/ghidra/
+
+# Librerías .so propietarias del juego original
+lib/*.so
+lib/**/*.so
+shadowguardian_extract/lib/
+
+# Assets del juego montados para pruebas
+ux0_data/
+assets/
+
+# Build artifacts
+/build/
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+compile_commands.json
+eboot.bin
+*.elf
+*.self
+*.vpk
+*.suprx
+*.bak
+
+# Debugging en consola real
+/logs/
+log_*.txt
+*.psp2dmp
+
+# Python
+__pycache__/
+*.pyc
+
+# Config local del toolkit (contiene IP de tu Vita -- no es secreto pero es de tu red)
+.psvita-toolkit.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+cmake-build-*/
+GloftSGHP
+Shadow Guardian-v1.0.1-Data-file.7z
+decompiled
