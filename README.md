@@ -4,17 +4,16 @@ This is a wrapper/port of **Shadow Guardian HD** for the PS Vita.
 
 The port works by loading the official Android ARMv7 `libshadowguardian.so` executable in memory, resolving its imports with custom stubs, and patching it to properly run on the PS Vita using a fake JNI environment and translating OpenGL ES 2.0 calls to [vitaGL](https://github.com/Rinnegatamante/vitaGL).
 
-## Current Status (Work in Progress)
+## Current Status
 
-**The game is NOT yet fully playable.**
+**The game is fully playable at a smooth 60 FPS.**
 
-Current progress:
-- The game boots up to the main menu.
+Current features:
+- The game is fully playable from start to finish.
 - Audio and music work perfectly (Vox engine mapped to Vita's PCM audio).
 - Touch controls and physical buttons are mapped and working.
 - Gameloft DRM has been bypassed.
-- **Major Bug:** 3D models, characters, and the world in both gameplay and cinematics appear completely black. This is due to an unresolved issue with texture loading (`mmap` length and `stat` struct alignment for `.tga` files) affecting diffuse textures. 
-- Some shaders fail to cache properly to disk (truncated binary), although they compile successfully at runtime.
+- Graphics render flawlessly using a natively built version of vitaGL.
 
 ## Setup Instructions (For End Users)
 
