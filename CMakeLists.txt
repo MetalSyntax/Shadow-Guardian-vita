@@ -53,7 +53,15 @@ else()
 endif()
 
 set(valid_dump_formats GLSL CG)
-option(DUMP_COMPILED_SHADERS "When using GLSL or CG shader format, cache compiled shaders on disk" ON)
+# OFF by default: vitaGL's vglGetShaderBinary() (lib/vitagl/source/custom_shaders.c)
+# ignores the bufSize argument entirely and writes the full serialized shader
+# regardless of the caller's buffer size -- glutil.c's glCompileShader_soloader
+# passes a fixed 128KB buffer, so any compiled shader larger than that overflows
+# it. Confirmed on real hardware: crashed inside serialize_shader() once vitaGL
+# was switched from the vdpm prebuilt (which silently no-op'd this call) to a
+# real from-source build. Not required for rendering -- it only caches compiled
+# .gxp binaries on disk for faster cold boots.
+option(DUMP_COMPILED_SHADERS "When using GLSL or CG shader format, cache compiled shaders on disk" OFF)
 if (DUMP_COMPILED_SHADERS)
   if (SHADER_FORMAT IN_LIST valid_dump_formats)
     add_definitions(-DDUMP_COMPILED_SHADERS)
@@ -115,10 +123,44 @@ target_include_directories(${CMAKE_PROJECT_NAME}
                            PUBLIC ${CMAKE_SOURCE_DIR}/source
                            )
 
+# VitaGL built from lib/vitagl (vendored from Rinnegatamante/vitaGL, same source
+# Asphalt-5-Vita and Dungeon-Hunter-2-vita already build from instead of the
+# generic vdpm-installed prebuilt package) rather than the system-installed
+# `vitaGL` vdpm library. Investigating the black-screen bug (Bug #13/#14 in
+# port_progress.md), the actual vdpm-linked libvitaGL.a's vglInitExtended() was
+# confirmed (via objdump on the real linked binary) to return GL_FALSE on the
+# very first call of the process, with vgl_inited already non-zero by the time
+# the check runs and no code in this project touching it beforehand -- building
+# from source gets us a copy we can actually instrument to find out why, and
+# matches the sibling ports' precedent of avoiding the vdpm package for
+# non-trivial games.
+# NO_DEBUG=1 (-DSKIP_ERROR_HANDLING per lib/vitagl/Makefile) deliberately left
+# out: it strips the NULL/bounds checks in vitaGL's public GL entry points (see
+# Bug #15 in port_progress.md -- glFramebufferTexture2D's `if (!fb) SET_GL_ERROR`
+# guard is one of them). This engine's own bloom/blur render-target setup calls
+# it while no real framebuffer is bound; on real Android/GPU drivers that's just
+# a validated no-op (GL_INVALID_OPERATION), but with SKIP_ERROR_HANDLING it's an
+# unguarded NULL deref and a hard crash instead.
+set(VITAGL_MAKE_FLAGS_STR "SOFTFP_ABI=1 HAVE_SHADER_CACHE=1 NO_SPLASHSCREEN=1")
+message(STATUS "vitaGL flags: ${VITAGL_MAKE_FLAGS_STR}")
+separate_arguments(VITAGL_MAKE_FLAGS UNIX_COMMAND "${VITAGL_MAKE_FLAGS_STR}")
+set(VITAGL_STAMP "${CMAKE_BINARY_DIR}/vitagl.stamp")
+
+# custom_target (not an OUTPUT-based add_custom_command) so this re-evaluates
+# every build; build_vitagl.sh's own stamp-diff decides whether a `make clean`
+# is actually needed, and the following `make` is incremental/cheap otherwise.
+add_custom_target(vitaGL_lib
+  COMMAND bash "${CMAKE_SOURCE_DIR}/lib/vitagl/build_vitagl.sh" "${VITAGL_MAKE_FLAGS_STR}" "${VITAGL_STAMP}" "${CMAKE_SOURCE_DIR}/lib/vitagl"
+  COMMAND make -C "${CMAKE_SOURCE_DIR}/lib/vitagl" ${VITAGL_MAKE_FLAGS}
+  BYPRODUCTS "${CMAKE_SOURCE_DIR}/lib/vitagl/libvitaGL.a"
+  COMMENT "Building vitaGL with custom flags..."
+)
+add_dependencies(${CMAKE_PROJECT_NAME} vitaGL_lib)
+
 target_link_libraries(${CMAKE_PROJECT_NAME}
                       -Wl,--whole-archive pthread -Wl,--no-whole-archive
                       stdc++
-                      vitaGL
+                      ${CMAKE_SOURCE_DIR}/lib/vitagl/libvitaGL.a
                       vitashark
                       SceShaccCgExt
                       taihen_stub

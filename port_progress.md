@@ -561,5 +561,226 @@
   - En `source/main.c`: se añadieron logs de diagnóstico `[DIAG]` para verificar el puntero `s_impl` y `driver` en la entrada al bucle de render.
   - `eboot.bin` recompilado y desplegado exitosamente vía FTP a la consola.
 
+### Bug #13 (confirmado 2026-09-04): Pantalla negra por carga de texturas fallida en `pig::stream::MMap()` (longitud de `mmap()` = `st_blksize`, no `st_size`)
+
+- **Síntoma:** Tras superar toda la carga inicial (Bugs #1-#12), el juego llegaba al menú (música de
+  título sonando, shaders de post-proceso cargando) pero la pantalla se veía negra. El log mostraba
+  **772** errores `Cannot load texture 'X.tga' ... Exp: !Game::GetInstance()->DisplayErrors() ||
+  layer.GetTexture()` — prácticamente toda textura de personaje/mundo fallaba al cargar.
+- **Causa raíz:**
+  - Ghidra (`decompiled/libshadowguardian_armeabi-v7a/ghidra/out_ghidra.c:412050`,
+    `pig::stream::MMap(std::string const&)`) hace `open()` + `fstat()` + `mmap()` para leer cada
+    textura, pero usa `sStack_488.st_blksize` (no `st_size`) como longitud del `mmap()` — un bug del
+    motor original que aparentemente "funcionaba" en Android real por casualidad (blksize del
+    filesystem de origen probablemente cubría archivos chicos).
+  - Nuestro `fstat_soloader` (`source/reimpl/io.c`) delega en el `fstat()` real de newlib sobre
+    `ux0:`, que reporta `st_blksize = 0` para archivos ahí — el juego terminaba llamando
+    `mmap(addr=NULL, length=0, ...)` para cada textura, que fallaba inmediatamente. Confirmado en el
+    log: `[warning] mmap(0x0, 0, 1, 1, 3, 0)` inmediatamente después de cada `open()`+`fstat()` de un
+    `.tga`.
+  - Bug secundario agravante: el shim `mmap()` en `source/reimpl/mem.c` nunca leía contenido real del
+    `fd` — solo hacía `malloc()` + `memset(0)` y devolvía memoria en cero, así que aunque `length`
+    hubiese sido correcto, las texturas habrían cargado como buffers vacíos (negro/basura), no el
+    contenido real del archivo.
+- **Fix aplicado:**
+  - En `source/reimpl/bits/_struct_converters.c` (`stat_newlib_to_bionic`): se fuerza
+    `dst->st_blksize = st_size` (cuando `st_size` > 0) para que el uso indebido de `st_blksize` como
+    "tamaño del archivo" en `MMap()` mapee el archivo completo en vez de 0 bytes.
+  - En `source/reimpl/mem.c` (`mmap()`): reimplementado para que de verdad lea el contenido del `fd`
+    (`lseek` + `read` en un buffer `malloc`eado del tamaño pedido) en vez de devolver memoria en cero.
+    `munmap()` sigue siendo un `free()` simple (no hay mapeo de páginas real).
+- **Verificado en consola física:** `game_log_1788536434751.txt` y `game_log_1788538117179.txt` — los
+  errores `Cannot load texture` bajaron de 772 a 106 (los restantes son texturas de gameplay/HUD
+  específicas, no assets de menú; a investigar aparte si hace falta), y `mmap(..., 0, ...)` bajó de
+  cientos a solo 10 instancias. El juego ahora carga el nivel de menú completo, reproduce música de
+  título y responde a input (sonido `sfx_menu_confirm.wav` al pulsar).
+- **Pendiente:** La pantalla del menú sigue viéndose negra pese a que el motor está vivo y responde a
+  input — no se descartó todavía si es un problema de render target/composición post-proceso
+  (`bloom_menu`/`blur_menu`) o de algún asset de fondo específico. Además: los 68 `Shader N binary
+  looks truncated (len=0)` en cada carga de shader del menú (`glutil.c`, `DUMP_COMPILED_SHADERS`) —
+  no bloquean el render (el shader sí compila en runtime, `compile_status == GL_TRUE`; solo falla el
+  cacheo del binario `.gxp` para arranques futuros) pero conviene investigarlos si el arranque en frío
+  resulta muy lento.
+### Bug #14 (confirmado 2026-09-04): CAUSA RAÍZ real de la pantalla negra — `vglInitExtended()` del `vitaGL` precompilado de vitasdk (vdpm) devolvía `GL_FALSE` desde la primera llamada del proceso
+
+- **Síntoma:** Con el Bug #13 ya arreglado (texturas cargando, audio sonando, motor respondiendo a
+  input), la pantalla seguía completamente negra. Incluso un `glClearColor`+`glClear`+swap de
+  diagnóstico puesto manualmente justo después de `gl_init()` — antes de que corriera código del
+  juego — no se veía en pantalla física. Eso descartó el pipeline de render del juego y apuntó a la
+  inicialización de vitaGL en sí.
+- **Causa raíz (confirmada desensamblando el `.a` real, no adivinando):**
+  - Con `arm-vita-eabi-objdump` sobre `libvitaGL.a` (el paquete vdpm de vitasdk), `vglInitExtended()` →
+    `vglInitWithCustomThreshold()` solo devuelve `GL_FALSE` en un único camino: si el flag estático
+    interno `vgl_inited` ya es distinto de cero.
+  - Instrumentando `main.c` con un contador de llamadas + lectura directa de memoria de `vgl_inited`
+    (dirección real vía `nm` sobre el ELF linkeado) en varios puntos del arranque, se confirmó que
+    `vgl_inited` valía `0` inmediatamente antes de la primera (y única) llamada a `gl_init()` en todo
+    el proceso, y que esa misma llamada devolvía `GL_FALSE`. Es decir: el flag se corrompe/pasa a 1
+    **dentro** de esa única llamada, en código que no pertenece a este proyecto (no hay ningún otro
+    call site a `vglInit*` en todo el binario, confirmado buscando `bl` hacia esas direcciones en el
+    ELF completo) — imposible de seguir depurando más sin el código fuente del `.a` precompilado.
+  - Los ports hermanos (Asphalt-5-Vita, Dungeon-Hunter-2-vita) ya habían abandonado el vitaGL
+    precompilado de vdpm por bugs conocidos con juegos "pesados" (ver sus CMakeLists.txt, comentarios
+    de Bug #19/#20/#22 de Asphalt5), compilándolo en cambio desde código fuente vendorizado
+    (`lib/vitagl/`, fork de Rinnegatamante/vitaGL) con flags propios.
+- **Fix aplicado:**
+  - Se vendorizó `lib/vitagl/` (commit `cd3791e29ff7f1c0ab349f12c7231f4871ce6a75` de
+    github.com/Rinnegatamante/vitaGL, mismo commit base que usa Dungeon-Hunter-2-vita) y se cambió
+    `CMakeLists.txt` para compilarlo desde fuente (`vitaGL_lib` custom target + `build_vitagl.sh`) en
+    vez de linkear el `vitaGL` de vdpm. Ver `lib/vitagl/VENDORED.md` para el detalle de qué se copió y
+    por qué.
+  - A diferencia de Dungeon-Hunter-2-vita (que sí tiene su propia capa EGL completa en
+    `source/reimpl/egl.c`, wireada en su CMakeLists), acá `source/reimpl/egl.c` existe pero **nunca
+    estuvo en el `CMakeLists.txt`** — es código muerto de una iteración anterior. Este proyecto
+    depende de la implementación EGL propia de vitaGL, así que se mantuvo `lib/vitagl/source/egl.c`
+    sin modificar (a diferencia del patrón de DH2 de eliminarlo).
+  - `.gitignore`: la regla `Makefile` (sin ancla) ignoraba también `lib/vitagl/Makefile` vendorizado,
+    rompiendo la copia que hace `psvita-toolkit build` a un directorio temporal. Se ancló a `/Makefile`.
+- **Verificado en consola física:** con este cambio, el flash de diagnóstico magenta **sí se vio en
+  pantalla** — primera confirmación real de que vitaGL presenta algo al framebuffer físico. Con el
+  diagnóstico ya quitado, el juego ahora muestra la pantalla de carga real (assets, texturas, UI) en
+  vez de negro.
+- **Efecto secundario descubierto:** con vitaGL real (no el vdpm que no-opeaba todo), `vglGetShaderBinary()`
+  (usada por el diagnóstico opcional `DUMP_COMPILED_SHADERS`, ver `source/utils/glutil.c`) **ignora el
+  parámetro `bufSize`** (confirmado leyendo `lib/vitagl/source/custom_shaders.c`) y escribe el shader
+  serializado completo sin chequear límites — con nuestro buffer fijo de 128 KB, cualquier shader más
+  grande desborda el buffer y crashea (antes esto no se notaba porque el vdpm simplemente no hacía
+  nada real). Se desactivó `DUMP_COMPILED_SHADERS` por defecto en `CMakeLists.txt` (mismo default que
+  ya usa Dungeon-Hunter-2-vita) — es solo una optimización de cacheo para arranques más rápidos, no
+  hace falta para que el juego renderice.
+- [x] Bug de pantalla negra CONFIRMADO RESUELTO en consola física.
+
+### Bug #15 (en investigación, 2026-09-04): Data Abort en `_glFramebufferTexture2D` (`fb == NULL`) al montar el render target de `bloom_menu`
+
+- **Síntoma:** Con el Bug #14 ya arreglado y la pantalla de carga visible, el juego crashea
+  inmediatamente después de `<bloom_menu> Linking pass 3...` en el log. Dump:
+  `logs/shadowguardian-psp2core-1788550747-0x0017282cf9-eboot.bin.psp2dmp`.
+  - `PC` dentro de `_glFramebufferTexture2D` (`lib/vitagl/source/shared.h:1355`),
+    `int old_w = fb->width` — desreferencia de `fb` nulo.
+  - `R4 = 0x00000000` en el volcado de registros, consistente con que el puntero `fb` (framebuffer
+    actualmente bindeado) es nulo en el momento de la llamada.
+- **Hipótesis de causa (sin confirmar aún):** el juego arma un FBO offscreen para el post-proceso de
+  bloom del menú (múltiples "Linking pass N" ya vistos en el log para `bloom_menu`/`blur_menu`) y
+  llama a `glFramebufferTexture2D` sin que haya un framebuffer real bindeado (`glBindFramebuffer` no
+  se llamó, falló, o el objeto 0/default no es válido para esta llamada según el spec de GLES2).
+- [ ] Seguir con `so-crash-triage`: encontrar el call site real de `glFramebufferTexture2D` para este
+  pase de bloom (Ghidra sobre `libshadowguardian.so`, buscar la función de setup de `bloom_menu` /
+  `RenderPassDef`) y confirmar si el bug es un `glBindFramebuffer` faltante/fallido antes de esta
+  llamada, o si depende de las texturas de canal que aún no cargan (`Cannot load texture` restantes).
+
+### Bug #16 (fix aplicado, sin confirmar en consola, 2026-09-04): cinemática `story_cinematic_1.bclara` "casi en negro" — probable misma causa raíz que los modelos 3D negros en gameplay
+
+- **Contexto:** `story_cinematic_1.bclara` (y las demás `story_cinematic_N.bclara`) NO son video
+  pre-renderizado — son escenas reales del motor con `CinematicCamera` propia
+  (`GameLevel::SwitchToNextCinematicCamera`, `GS_GamePlay::UpdateCinematicCamera`,
+  `GS_GamePlay::DoSkipCinematic` en el pseudo-C de Ghidra), armadas con modelos `.pig` normales
+  (`cin_a01_final.pig`) y shaders normales de personaje (`bump.xml`/`character_body.xml` →
+  `df_nm_sm_spec_fres_refl.fs`). No hay ningún shader propio de fade/vignette/letterbox para
+  cinemáticas en `ux0_data/shadowguardian/shaders/` — el único fundido es el `FadeIn`/`FadeOut` de Lua
+  (`decompiled/.../out_ghidra.c:194251-194274`, registrado como función de script), que es lógica de
+  guion normal, no un bug de render.
+- **Síntoma real:** en `logs/game_log_1788552823938.txt` (~línea 5728), al cargar las texturas del
+  personaje de la cinemática, se ven `mmap()` con longitudes absurdas: `cin_a01.tga` → `mmap(0x0, 1,
+  ...)`, `cin_t03.tga` → `mmap(0x0, 0, ...)`, `cin_d03.tga` y `cin_s01.tga` → `mmap(0x0, 10, ...)` — pese
+  a que los archivos reales miden 87536, 11064, 699192 y 699192 bytes respectivamente (confirmado
+  comparando `GloftSGHP/textures/*.tga` contra `ux0_data/shadowguardian/textures/*.tga`, tamaños
+  idénticos). Esto es la MISMA familia de bug que el Bug #13 (mmap con longitud incorrecta al cargar
+  texturas vía `pig::stream::MMap()`), pero afecta al subconjunto de ~106 texturas que quedaron sin
+  resolver tras ese fix (texturas de nivel/gameplay/cinemática, no de menú) — el mismo hueco que ya
+  había dejado marcado un diagnóstico temporal en `fstat_soloader()` (`source/reimpl/io.c`).
+- **Causa raíz (hipótesis fuerte, no confirmada en hardware):** `MMap()` (pseudo-C en
+  `decompiled/libshadowguardian_armeabi-v7a/ghidra/out_ghidra.c:412026`) hace `open()` + `fstat(fd,
+  &st)` + `mmap(..., st.st_blksize, ...)` + `close()` — un único call site, igual para texturas de menú
+  y de nivel. La ruta de acceso por PATH (`stat()`, usada segundos después por el propio motor para un
+  `fopen()` redundante sobre el mismo archivo) siempre reporta éxito para estos mismos archivos. Es
+  decir: `stat(path, ...)` y `fstat(fd, ...)` sobre el MISMO archivo dan tamaños distintos. En el
+  newlib de vitasdk, `stat()` está respaldado por `sceIoGetstat()` (por path) mientras que `fstat()`
+  está respaldado por `sceIoGetstatByFd()` (por descriptor) — dos syscalls distintas. La hipótesis es
+  que `sceIoGetstatByFd()` devuelve un `st_size` obsoleto/corto para un handle recién abierto bajo la
+  carga de I/O concurrente más pesada del streaming de nivel/cinemática (no se reproduce en el menú,
+  con I/O mucho más liviano y secuencial). Esto NO es un bug de shading/iluminación — el pipeline de
+  render de personajes (`df_nm_sm_spec_fres_refl.fs`, con luz difusa + especular) es el sospechoso
+  natural para "modelos negros", pero acá la causa real es más básica: la textura de difuso jamás llega
+  a cargar contenido real (el buffer que devuelve nuestro `mmap()` queda con 0/1/10 bytes reales y el
+  resto en cero por el `memset` de relleno en `source/reimpl/mem.c`), así que el material se ve negro
+  independientemente de que la iluminación esté bien calculada.
+- **Fix aplicado (sin verificar en consola todavía):** en `source/reimpl/io.c`, `fstat_soloader()` ahora
+  hace un `lseek(fd, 0, SEEK_END)` (con `lseek` de vuelta a la posición original) inmediatamente después
+  de un `fstat()` exitoso, y si el tamaño real medido por `lseek` es mayor que `st.st_size`, reemplaza
+  `st.st_size` por ese valor antes de pasarlo a `stat_newlib_to_bionic()` (que ya hacía
+  `st_blksize = st_size`, fix del Bug #13). `lseek()` va por `sceIoLseek()`, una ruta distinta que no
+  comparte el problema sospechado de `sceIoGetstatByFd()`. El reemplazo es unidireccional (solo agranda,
+  nunca achica) para no romper los ~666 casos que el Bug #13 ya dejó funcionando.
+- **Relación con el bug de "modelos 3D negros en gameplay":** con muy alta probabilidad es la MISMA
+  causa raíz — ambos son escenas 3D reales (no UI 2D) que dependen de `pig::stream::MMap()` para cargar
+  texturas de personaje/mundo durante streaming de nivel, y ambos coinciden con el conjunto de ~106
+  texturas que el Bug #13 no llegó a arreglar. La diferencia entre "casi negro" (cinemática) y
+  "completamente negro" (gameplay) es coherente con este mismo mecanismo: en el shader de personaje
+  (`df_nm_sm_spec_fres_refl.fs`) el término especular se calcula con `pow(abs(NdotH), Shininess)` — el
+  `abs()` hace que siempre haya un brillo especular residual incluso con la textura de difuso en negro,
+  lo que puede bastar para que una cinemática con más iluminación direccional/rim se vea "casi" negra en
+  vez de perfectamente negra, mientras que superficies con menos luz de relleno en gameplay normal caen
+  a negro puro.
+- [ ] Pendiente confirmar en consola física (build/deploy fuera de este agente): verificar que
+  `cin_a01.tga`/`cin_t03.tga`/`cin_d03.tga`/`cin_s01.tga` (y las texturas de personaje/gameplay que
+  fallaban) ahora mapean su tamaño real y que tanto la cinemática como los modelos de gameplay dejan de
+  verse negros. Si el diagnóstico de `lseek` no ayuda (o el problema es aún otro), instrumentar
+  `sceIoGetstatByFd()` directamente para comparar sus campos crudos contra `sceIoGetstat()` sobre el
+  mismo path.
+
+#### Addendum a Bug #16 (fix aplicado, sin confirmar en consola, 2026-09-04): `stat64_bionic` tenía un campo de relleno de más — `st_blksize` caía 4 bytes después de donde el binario real lo lee
+
+- **Contexto:** investigando el mismo síntoma de Bug #16 (modelos/mundo negros en gameplay real, no
+  solo la cinemática) para el ticket "se ve todo negro, no veo los modelos, pero sí el texto y el
+  audio", se desensambló directamente `libshadowguardian.so` (no solo el pseudo-C de Ghidra) para las
+  dos únicas funciones que llaman a `fstat()`/`mmap()`/`munmap()` en todo el binario:
+  `_Z4MMapRKSs` (`0x2ffb30`) y `_Z6MUnmapRKSsPv` (`0x2ffc40`).
+- **Hallazgo (confirmado por desensamblado, no por inferencia del log):**
+  ```
+  2ffbb8: add  r1, sp, #8         ; buffer de stat pasado a fstat() empieza en sp+8
+  2ffbbc: bl   fstat@plt
+  2ffbd4: ldr  r1, [sp, #0x38]    ; longitud para mmap() = *(stat_buf + 0x30)
+  2ffbe0: bl   mmap@plt
+  ```
+  y de forma idéntica en `MUnmap` (`ldr r1, [sp, #0x30]` relativo a un buffer de stat que también
+  arranca en `sp`). Es decir: el binario real, en las DOS únicas llamadas de todo el juego que usan
+  este valor como longitud de `mmap()`/`munmap()`, lo lee de **exactamente el byte 0x30 (48)** dentro
+  del struct `stat` que le pasamos.
+  - Con el `stat64_bionic` tal cual quedó tras el fix de nlink/uid/gid de Bug #16 (documentado arriba,
+    campos anchados a `unsigned int`), `offsetof(stat64_bionic, st_blksize)` da **0x34 (52)**, no 0x30 —
+    confirmado compilando el struct exacto por fuera (`offsetof()` en un test host). El campo
+    `__pad3[4]` entre `st_rdev` y `st_size` (heredado de un header de referencia de bionic genérico)
+    sobra: `st_rdev` ya termina en el offset 32, múltiplo de 8, así que no hace falta relleno para
+    alinear el siguiente campo de 8 bytes. Ese relleno de más es lo que corre `st_size`/`st_blksize` 4
+    bytes de más respecto de lo que el binario compilado realmente lee.
+  - Efecto práctico: aunque `stat_newlib_to_bionic()` escriba el tamaño real del archivo en
+    `dst->st_blksize` (fix de Bug #13) y aunque ese tamaño ya venga corregido por el `lseek()` de Bug
+    #16, el valor cae en el byte 0x34, mientras que `MMap()`/`MUnmap()` siguen leyendo el byte 0x30 --
+    4 bytes antes, dentro de la mitad alta de `st_size`. El resultado es que la longitud de `mmap()`
+    para *toda* textura/asset cargado por `pig::stream::MMap()` -- no solo las ~106-400 que llegan a
+    imprimir `Cannot load texture` -- depende de bytes que no son el tamaño real del archivo. Esto
+    explicaría por qué el reporte de este ticket es "no veo NINGÚN modelo" (todos en negro) y no solo
+    los personajes con texturas puntualmente rotas: los materiales que sí "cargan" sin error visible en
+    el log también pueden estar recibiendo datos de píxel truncados/incorrectos por este mismo bug,
+    solo que sin disparar la validación estricta que produce el mensaje de error.
+- **Fix aplicado:** en `source/reimpl/io.h`, se eliminó el campo `__pad3[4]` de `stat64_bionic`, lo que
+  deja `st_size` en el offset 40 y `st_blksize` en el offset 48 (0x30) -- coincidiendo exactamente con
+  el desensamblado. Se agregó un `_Static_assert(offsetof(stat64_bionic, st_blksize) == 0x30, ...)`
+  para que cualquier cambio futuro a este struct que rompa el alineamiento falle en tiempo de
+  compilación en vez de volver a producir este bug silenciosamente.
+- **Relación con el fix de `lseek()` de Bug #16:** son complementarios, no alternativos -- el fix de
+  `lseek()` garantiza que `st.st_size` (el valor *fuente*, antes de convertir) sea el tamaño real del
+  archivo incluso si `sceIoGetstatByFd()` devuelve algo obsoleto/corto; este fix garantiza que ese valor
+  ya correcto efectivamente llegue al byte exacto que el binario real lee para `mmap()`/`munmap()`. Sin
+  este segundo fix, el primero por sí solo seguía escribiendo el tamaño correcto 4 bytes fuera de lugar.
+- **Confianza:** alta en la causa raíz del desalineamiento (verificada por desensamblado directo del
+  `.so`, no por conjetura), pero **sin confirmar en hardware real** -- este agente no compiló ni
+  desplegó nada (instrucción explícita de la tarea).
+- [ ] Pendiente confirmar en consola física: recompilar, desplegar, y verificar en
+  `game_log_*.txt` que los `mmap(0x0, N, ...)` de texturas de personaje/mundo ahora muestran `N` igual
+  al tamaño real del archivo (no 0/1/2/10), y que los modelos 3D dejan de verse negros en gameplay real
+  (tutorial intro/outro, nivel real). Si el problema persiste incluso con `N` correcto, la siguiente
+  hipótesis a descartar es el pipeline de `mem.c`'s `mmap()` (lectura real del contenido del fd hacia el
+  buffer) para buffers grandes, o el propio decodificador de textura DDS/TGA del motor.
 
 

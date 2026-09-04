@@ -37,6 +37,15 @@ void gl_preload() {
 }
 
 void gl_init() {
+    // vglInitExtended()/vglInitWithCustomSizes() return GL_FALSE if vitaGL is
+    // already initialized (lib/vitagl/source/vgl.c). Guard against a redundant
+    // second call instead of relying on it only ever being called once.
+    static unsigned char vgl_initialized = 0;
+    if (vgl_initialized) {
+        return;
+    }
+    vgl_initialized = 1;
+
     vglInitExtended(0, 960, 544, 6 * 1024 * 1024, SCE_GXM_MULTISAMPLE_4X);
 }
 

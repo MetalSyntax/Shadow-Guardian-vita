@@ -211,10 +211,44 @@ int fstat_soloader(int fd, stat64_bionic * buf) {
     struct stat st;
     int res = fstat(fd, &st);
 
-    if (res == 0)
+    if (res == 0) {
+        // Bug #16 (cinematic/gameplay near-black textures, port_progress.md
+        // Bug #15/#16): pig::stream::MMap() does open()+fstat()+mmap() and
+        // uses st_blksize (patched to mirror st_size, see stat_newlib_to_bionic
+        // below) as the mmap() length. That worked for ~666 of the menu's
+        // textures (Bug #13) but ~106 remaining textures -- all of them loaded
+        // later, during level/cinematic streaming rather than at the menu --
+        // still got mmap()'d with absurdly small lengths (1, 0, 10 bytes seen
+        // in game_log_1788552823938.txt for cin_a01.tga/cin_t03.tga/
+        // cin_d03.tga, all real files tens/hundreds of KB in size).
+        //
+        // The game's own MMap() also does a redundant path-based stat() +
+        // fopen() on the very same file right after this fstat() call, and
+        // that path-based stat() always reports success -- so the file is
+        // genuinely present with a real size on ux0:, and only the *fd-based*
+        // fstat() is unreliable for it. On the Vita's newlib, fstat(fd, ...)
+        // is backed by sceIoGetstatByFd(), a separate syscall from the
+        // path-based sceIoGetstat() that stat()/stat_soloader() use, and it
+        // can report a stale/short st_size for a handle that was just
+        // opened (more likely to be hit under the heavier concurrent I/O of
+        // level/cinematic streaming than at the menu). lseek()-based sizing
+        // goes through sceIoLseek() instead, which doesn't share that issue,
+        // so use it to get the real size and let stat_newlib_to_bionic()'s
+        // st_blksize=st_size hack (below) work of off a trustworthy value.
+        off_t cur = lseek(fd, 0, SEEK_CUR);
+        if (cur != (off_t) -1) {
+            off_t end = lseek(fd, 0, SEEK_END);
+            lseek(fd, cur, SEEK_SET);
+            if (end != (off_t) -1 && end > st.st_size) {
+                l_debug("fstat(%i): st_size=%lld looked stale, using lseek "
+                        "size=%lld instead", fd, (long long) st.st_size,
+                        (long long) end);
+                st.st_size = end;
+            }
+        }
         stat_newlib_to_bionic(&st, buf);
+    }
 
-    l_debug("fstat(%i): %i", fd, res);
     return res;
 }
 

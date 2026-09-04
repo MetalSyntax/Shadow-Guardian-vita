@@ -88,7 +88,14 @@ void stat_newlib_to_bionic(const struct stat * src, stat64_bionic * dst) {
     dst->st_gid = src->st_gid;
     dst->st_rdev = src->st_rdev;
     dst->st_size = src->st_size;
-    dst->st_blksize = src->st_blksize;
+    // The game's pig::stream::MMap() uses st_blksize (not st_size) as the
+    // mmap() length -- on real Android hardware this happened to be large
+    // enough to cover whole asset files, but our newlib fstat() reports 0
+    // for files on ux0:, so every mmap()-based texture load failed with
+    // length=0. Report the full file size as the "block size" so MMap()
+    // maps the whole file.
+    dst->st_blksize = src->st_size ? (unsigned long) src->st_size
+                                    : src->st_blksize;
     dst->st_blocks = src->st_blocks;
     dst->st_atim.tv_sec = src->st_atime;
     dst->st_atim.tv_nsec = 0;
