@@ -29,10 +29,16 @@ In order to properly install the game, you'll need to extract the data from the 
 
 ## Controls
 
-- **Touch Screen** - Original Touch Controls
-- **Circle** - Pause / Menu
-
-*(Note: Physical buttons such as Analog sticks, D-Pad, Triggers, and other action buttons are not properly mapped yet and will be implemented in a future update.)*
+- **Touch Screen** - Original Touch Controls (menus, etc.)
+- **Left Analog / D-Pad** - Movement (virtual joystick)
+- **Right Analog** - Camera (free-look)
+- **R** - Fire
+- **L / Square** - Aim (hold)
+- **Cross** - Contextual action (jump / run / grab / climb)
+- **Circle** - Interact / Take cover (contextual)
+- **Triangle** - Reload / Switch weapon (combat)
+- **Start** - Pause / Back
+- **Select** - Menu
 
 ## Build Instructions (For Developers)
 

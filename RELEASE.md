@@ -1,9 +1,10 @@
-# Shadow Guardian Vita v1.0
+# Shadow Guardian Vita v1.1
 
 This is a wrapper/port of **Shadow Guardian HD** for the PS Vita.
 
 ## Changelog
-- Initial release.
+- v1.1: Full physical-controls mapping verified on hardware (sticks, D-Pad, R/L, Cross/Circle/Square/Triangle with touch injection at the real on-screen button positions); direct 800x480 to 960x544 display scaling fix (no FBO, engine FBOs untouched); analog deadzone with rescaling to absorb stick drift.
+- v1.0: Initial release.
 
 ## Setup Instructions
 
@@ -19,15 +20,19 @@ In order to properly install the game, you'll need to extract the data from the 
 
 ## Controls
 
-- **Left Analog / D-Pad** - Movement
-- **Right Analog** - Camera
-- **Cross/Square/Triangle/Circle** - Action Buttons
-- **L/R Triggers** - Aim/Shoot
-- **Start / Circle** - Pause / Back
+- **Left Analog / D-Pad** - Movement (virtual joystick)
+- **Right Analog** - Camera (free-look)
+- **R** - Fire
+- **L / Square** - Aim (hold)
+- **Cross** - Contextual action (jump / run / grab / climb)
+- **Circle** - Interact / Take cover (contextual)
+- **Triangle** - Reload / Switch weapon (combat)
+- **Start** - Pause / Back
 - **Select** - Menu
 - **Touch Screen** - Original Touch Controls
 
 ## Known Issues
+- Reload/weapon touch position (Triangle) confirmed by layout only; verify in combat on hardware.
 - [Update this section prior to release with any remaining unresolved bugs]
 
 ## Credits

@@ -53,6 +53,35 @@ void gl_swap() {
     vglSwapBuffers(GL_FALSE);
 }
 
+// Resolucion que se le reporta al motor (la de referencia del juego)
+// frente a la pantalla fisica real de la Vita.
+#define ENG_W 800
+#define ENG_H 480
+#define REAL_W 960
+#define REAL_H 544
+
+// FBO actualmente enlazado como GL_FRAMEBUFFER (0 = pantalla).
+static GLuint s_bound_fbo = 0;
+
+void glBindFramebuffer_soloader(GLenum target, GLuint framebuffer) {
+    if (target == GL_FRAMEBUFFER) {
+        s_bound_fbo = framebuffer;
+    }
+    glBindFramebuffer(target, framebuffer);
+}
+
+void glViewport_soloader(GLint x, GLint y, GLsizei width, GLsizei height) {
+    // Solo el viewport de pantalla completa sobre el framebuffer por
+    // defecto se estira a la pantalla real. Los viewports de los FBOs
+    // propios del motor (post-efectos, sombras) pasan intactos para
+    // no romper su resolucion interna.
+    if (s_bound_fbo == 0 && x == 0 && y == 0 && width == ENG_W && height == ENG_H) {
+        glViewport(0, 0, REAL_W, REAL_H);
+        return;
+    }
+    glViewport(x, y, width, height);
+}
+
 void glShaderSource_soloader(GLuint shader, GLsizei count,
                              const GLchar **string, const GLint *_length) {
 #ifdef DEBUG_OPENGL

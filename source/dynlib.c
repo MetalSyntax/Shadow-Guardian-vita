@@ -520,8 +520,8 @@ so_default_dynlib default_dynlib[] = {
         { "glAttachShader", (uintptr_t)&glAttachShader },
         { "glBindAttribLocation", (uintptr_t)&glBindAttribLocation },
         { "glBindBuffer", (uintptr_t)&glBindBuffer },
-        { "glBindFramebuffer", (uintptr_t)&glBindFramebuffer },
-        { "glBindFramebufferOES", (uintptr_t)&glBindFramebuffer },
+        { "glBindFramebuffer", (uintptr_t)&glBindFramebuffer_soloader },
+        { "glBindFramebufferOES", (uintptr_t)&glBindFramebuffer_soloader },
         { "glBindRenderbuffer", (uintptr_t)&glBindRenderbuffer },
         { "glBindRenderbufferOES", (uintptr_t)&glBindRenderbuffer },
         { "glBindTexture", (uintptr_t)&glBindTexture },
@@ -763,7 +763,7 @@ so_default_dynlib default_dynlib[] = {
         { "glVertexAttrib4fv", (uintptr_t)&glVertexAttrib4fv },
         { "glVertexAttribPointer", (uintptr_t)&glVertexAttribPointer },
         { "glVertexPointer", (uintptr_t)&glVertexPointer },
-        { "glViewport", (uintptr_t)&glViewport },
+        { "glViewport", (uintptr_t)&glViewport_soloader },
         { "glWeightPointerOES", (uintptr_t)&ret0 },
 
 

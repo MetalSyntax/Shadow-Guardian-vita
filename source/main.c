@@ -26,8 +26,8 @@ int sceLibcHeapSize = 32 * 1024 * 1024;
 
 so_module so_mod;
 
-#define SCREEN_W 960
-#define SCREEN_H 544
+#define SCREEN_W 800
+#define SCREEN_H 480
 
 // Native function pointer types
 typedef void (*sg_get_info_fn)(JNIEnv *, jobject, jstring, jstring, jstring, jstring, jstring, jstring, jstring);
@@ -92,6 +92,98 @@ static void resolve_entrypoints(void) {
         "Java_com_gameloft_android_ANMP_GloftSGHP_ML_ShadowGuardian_nativeOnKeyUp");
     nativeCanInterrupt = (sg_can_interrupt_fn)resolve_sym_or_die(
         "Java_com_gameloft_android_ANMP_GloftSGHP_ML_ShadowGuardian_nativeCanInterrupt");
+}
+
+// ---------------------------------------------------------------------------
+// Physical -> touch mapping (Shadow Guardian is 100% touch-driven).
+//
+// Findings (decompiled/ + GameGLSurfaceView.java + out_ghidra.c):
+// - nativeOnTouch(action, x, y, fingerId): 1 = DOWN, 2 = MOVE, 0 = UP,
+//   coordinates in ENGINE pixels (800x480, what the game believes the
+//   screen is). The fullscreen viewport is stretched x1.2 / x1.1333 to
+//   the real 960x544 by glViewport_soloader (direct scaling, no FBO),
+//   so engine_x = screen_x * 800/960, engine_y = screen_y * 480/544.
+// - nativeOnKeyDown/Up only feeds Game::OnKeyPressed/Released, which handles
+//   KEYCODE_BACK (4) -> action 0x38, KEYCODE_MENU (82) -> action 0x39,
+//   key 24 -> action 0x3a. There are NO keycodes for fire/jump/aim/cover:
+//   all gameplay actions go through TouchManager touch areas + the virtual
+//   joystick (left, touch radius ~70px around its GUI position) + free-camera
+//   drag (right side). The in-game button layout is user-customizable
+//   (options menu), so the coordinates below are the DEFAULT Gameloft layout
+//   -- tune them if you moved the buttons.
+// - Synthetic touches use fingerIds 50..65, outside the real front-touch id
+//   range, so they never collide with real finger tracking below.
+// Button positions measured on real 960x544 gameplay screenshot
+// (screenshots/dc/2026-09-06/2026-09-06-033741.jpg, exploration scene),
+// converted to engine space (x*800/960, y*480/544):
+//   R                 -> FIRE (gun icon, bottom-center-right)
+//   L / SQUARE        -> AIM (small crosshair, bottom-right corner, hold)
+//   CROSS             -> JUMP/climb (runner icon, mid-right)
+//   CIRCLE            -> HAND/interact top-right slot (contextual: hand,
+//                        cover, etc. depending on scene)
+//   TRIANGLE          -> RELOAD/weapon (GUESS: left of FIRE; only visible
+//                        in combat -- verify on hardware, harmless if empty)
+//   Left stick / Dpad -> virtual joystick (down + drag around its center)
+//   Right stick       -> free-look camera (drag on right half)
+// ---------------------------------------------------------------------------
+#define F_FIRE_X   621
+#define F_FIRE_Y   422
+#define F_AIM_X    738
+#define F_AIM_Y    432
+#define F_ACT_X    738
+#define F_ACT_Y    304
+#define F_COVER_X  738
+#define F_COVER_Y  176
+#define F_WPN_X    542
+#define F_WPN_Y    424
+
+#define F_JOY_CX   129
+#define F_JOY_CY   406
+#define F_JOY_R    50
+// Deadzone (analog units, 0..128): 20 absorbs stick drift/noise without
+// hurting response; output is rescaled so full deflection = full radius.
+#define F_JOY_DZ   20
+
+#define F_CAM_X    583
+#define F_CAM_Y    240
+
+#define FID_JOY   50
+#define FID_CAM   51
+#define FID_FIRE  60
+#define FID_AIM   61
+#define FID_ACT   62
+#define FID_COVER 63
+#define FID_WPN   64
+
+// Deadzone with rescaling: values within dz snap to 0, the rest is
+// stretched so max deflection still gives full radius (no range loss,
+// no jump at the threshold like a plain cutoff).
+static inline int dz_rescale(int v, int radius) {
+    int a = v < 0 ? -v : v;
+    if (a <= F_JOY_DZ) return 0;
+    int t = ((a - F_JOY_DZ) * radius) / (128 - F_JOY_DZ);
+    return v < 0 ? -t : t;
+}
+
+static inline void synth_touch(int action, int x, int y, int fid) {
+    if (nativeGameGLSurfaceViewOnTouch)
+        nativeGameGLSurfaceViewOnTouch(&jni, NULL, action, x, y, fid);
+}
+
+// Edge-triggered tap/hold button: down on press, up on release.
+// mask may combine several physical buttons sharing one touch spot.
+static inline void synth_button(uint32_t pressed, uint32_t released, uint32_t mask,
+                                int *active, int fid, int x, int y) {
+    if ((pressed & mask) && !*active) {
+        *active = 1;
+        synth_touch(1, x, y, fid);
+    }
+    if ((released & mask) && *active) {
+        // Only release when NONE of the sharing buttons is still held;
+        // the caller passes `released` filtered for that (see loop).
+        *active = 0;
+        synth_touch(0, x, y, fid);
+    }
 }
 
 int main(void) {
@@ -176,6 +268,7 @@ int main(void) {
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
 
     SceCtrlData pad;
+    memset(&pad, 0, sizeof(pad));
     SceTouchData touch;
     SceTouchData touch_old;
     memset(&touch, 0, sizeof(touch));
@@ -184,22 +277,28 @@ int main(void) {
     uint32_t old_buttons = 0;
     uint32_t current_buttons = 0;
 
+    int joy_active = 0, joy_x = F_JOY_CX, joy_y = F_JOY_CY;
+    int cam_active = 0, cam_x = F_CAM_X, cam_y = F_CAM_Y;
+    int fire_on = 0, aim_on = 0, act_on = 0, cover_on = 0, wpn_on = 0;
+
     l_info("Entering main render loop...");
     while (1) {
         sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DEFAULT);
 
-        // Controller buttons
+        // Physical controls -> native keys + synthetic touches.
         if (sceCtrlPeekBufferPositive(0, &pad, 1) > 0) {
             old_buttons = current_buttons;
             current_buttons = pad.buttons;
             uint32_t pressed = current_buttons & ~old_buttons;
             uint32_t released = ~current_buttons & old_buttons;
 
-            // START or CIRCLE -> KEYCODE_BACK (4)
-            if (pressed & (SCE_CTRL_START | SCE_CTRL_CIRCLE)) {
+            // START -> KEYCODE_BACK (4): pause / back in menus.
+            // NOTE: CIRCLE no longer sends BACK (old behaviour); it is the
+            // COVER/crouch touch button below, like Uncharted on Vita.
+            if (pressed & SCE_CTRL_START) {
                 nativeOnKeyDown(&jni, NULL, 4);
             }
-            if (released & (SCE_CTRL_START | SCE_CTRL_CIRCLE)) {
+            if (released & SCE_CTRL_START) {
                 nativeOnKeyUp(&jni, NULL, 4);
             }
 
@@ -209,6 +308,84 @@ int main(void) {
             }
             if (released & SCE_CTRL_SELECT) {
                 nativeOnKeyUp(&jni, NULL, 82);
+            }
+
+            // Fire: R trigger (hold). Synthetic DOWN once, UP on release.
+            synth_button(pressed, released, SCE_CTRL_RTRIGGER,
+                         &fire_on, FID_FIRE, F_FIRE_X, F_FIRE_Y);
+            // Aim: L trigger (hold). Shares the spot with SQUARE below.
+            if ((pressed & (SCE_CTRL_LTRIGGER | SCE_CTRL_SQUARE)) && !aim_on) {
+                aim_on = 1;
+                synth_touch(1, F_AIM_X, F_AIM_Y, FID_AIM);
+            }
+            if (!(current_buttons & (SCE_CTRL_LTRIGGER | SCE_CTRL_SQUARE)) && aim_on) {
+                aim_on = 0;
+                synth_touch(0, F_AIM_X, F_AIM_Y, FID_AIM);
+            }
+            // ACT contextual (jump/run/grab/climb): CROSS (hold/tap).
+            synth_button(pressed, released, SCE_CTRL_CROSS,
+                         &act_on, FID_ACT, F_ACT_X, F_ACT_Y);
+            // Cover/crouch: CIRCLE (hold/tap).
+            synth_button(pressed, released, SCE_CTRL_CIRCLE,
+                         &cover_on, FID_COVER, F_COVER_X, F_COVER_Y);
+            // Weapon switch: TRIANGLE (tap).
+            synth_button(pressed, released, SCE_CTRL_TRIANGLE,
+                         &wpn_on, FID_WPN, F_WPN_X, F_WPN_Y);
+
+            // Left stick + Dpad -> virtual joystick (finger FID_JOY).
+            // Dpad gives a digital fallback sharing the same touch point.
+            int lx = (int)pad.lx - 128;
+            int ly = (int)pad.ly - 128;
+            if (current_buttons & SCE_CTRL_LEFT)  lx -= 128;
+            if (current_buttons & SCE_CTRL_RIGHT) lx += 128;
+            if (current_buttons & SCE_CTRL_UP)    ly -= 128;
+            if (current_buttons & SCE_CTRL_DOWN)  ly += 128;
+            if (lx < -128) lx = -128;
+            if (lx >  127) lx =  127;
+            if (ly < -128) ly = -128;
+            if (ly >  127) ly =  127;
+            int ox = dz_rescale(lx, F_JOY_R);
+            int oy = dz_rescale(ly, F_JOY_R);
+            if (ox != 0 || oy != 0) {
+                joy_x = F_JOY_CX + ox;
+                joy_y = F_JOY_CY + oy;
+                if (!joy_active) {
+                    joy_active = 1;
+                    synth_touch(1, joy_x, joy_y, FID_JOY);
+                } else {
+                    synth_touch(2, joy_x, joy_y, FID_JOY);
+                }
+            } else if (joy_active) {
+                joy_active = 0;
+                joy_x = F_JOY_CX;
+                joy_y = F_JOY_CY;
+                synth_touch(0, joy_x, joy_y, FID_JOY);
+            }
+
+            // Right stick -> free-look camera drag (finger FID_CAM).
+            // Anchor in the middle of the right half; deflect to drag.
+            int rx = (int)pad.rx - 128;
+            int ry = (int)pad.ry - 128;
+            int cox = dz_rescale(rx, 100);
+            int coy = dz_rescale(ry, 100);
+            if (cox != 0 || coy != 0) {
+                cam_x = F_CAM_X + cox;
+                cam_y = F_CAM_Y + coy;
+                if (cam_x < 0) cam_x = 0;
+                if (cam_x >= SCREEN_W) cam_x = SCREEN_W - 1;
+                if (cam_y < 0) cam_y = 0;
+                if (cam_y >= SCREEN_H) cam_y = SCREEN_H - 1;
+                if (!cam_active) {
+                    cam_active = 1;
+                    synth_touch(1, cam_x, cam_y, FID_CAM);
+                } else {
+                    synth_touch(2, cam_x, cam_y, FID_CAM);
+                }
+            } else if (cam_active) {
+                cam_active = 0;
+                synth_touch(0, cam_x, cam_y, FID_CAM);
+                cam_x = F_CAM_X;
+                cam_y = F_CAM_Y;
             }
         }
 
