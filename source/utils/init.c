@@ -67,6 +67,21 @@ void soloader_init_all() {
                     "sure that you have %s file exactly at that path.", SO_PATH);
     }
 
+    if (!file_exists(DATA_PATH "sprites_1_7") &&
+        !file_exists(DATA_PATH "sprites_1_6") &&
+        !file_exists(DATA_PATH "GloftSGHP/sprites_1_6")) {
+        fatal_error("Missing game data files in %s.\n\n"
+                    "Please make sure you copied all game asset files (including 'sprites_1_6' or 'sprites_1_7') "
+                    "directly into %s.", DATA_PATH, DATA_PATH);
+    }
+
+    if (!file_exists(DATA_PATH "res") &&
+        !file_exists(DATA_PATH "GloftSGHP/res")) {
+        fatal_error("Missing 'res' folder in %s.\n\n"
+                    "Please make sure you copied all game asset folders (res, shaders, textures, models, etc.) "
+                    "directly into %s.", DATA_PATH, DATA_PATH);
+    }
+
     if (so_file_load(&so_mod, SO_PATH, LOAD_ADDRESS) < 0) {
         l_fatal("SO could not be loaded.");
         fatal_error("Error: could not load %s.", SO_PATH);

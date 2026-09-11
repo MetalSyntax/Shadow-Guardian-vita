@@ -1,8 +1,10 @@
-# Shadow Guardian Vita v1.2
+# Shadow Guardian Vita v1.2.1
 
 This is a wrapper/port of **Shadow Guardian HD** for the PS Vita.
 
 ## Changelog
+
+- v1.2.1: Robustness hotfix — added validation guards in vitaGL's `unserialize_shader` and `glLinkProgram` to prevent crash on corrupted/0-byte shader cache files (falls back to recompilation cleanly); added early startup data validation in `init.c` with friendly error dialogues if required game assets (`sprites_1_6`/`sprites_1_7` or `res/`) are missing; improved asset fallback routing for `GloftSGHP/` subfolders.
 - v1.2: Intro video playback (`logo.m4v`) via SceAvPlayer on boot; virtual touch buttons hide/show with CIRCLE via `SetItemAlpha` (indices 0-10, weapon selector stays visible); D-Pad sends native menu keys; left stick only drives the virtual joystick in-game; faster free-look camera (drag radius 100→250) and wider stick deadzone (20→40); fixed crash on in-game Exit (`SoundMgr::Update` NULL deref — process now exits cleanly to LiveArea).
 - v1.1: Full physical-controls mapping verified on hardware (sticks, D-Pad, R/L, Cross/Circle/Square/Triangle with touch injection at the real on-screen button positions); direct 800x480 to 960x544 display scaling fix (no FBO, engine FBOs untouched); analog deadzone with rescaling to absorb stick drift.
 - v1.0: Initial release.
@@ -35,6 +37,7 @@ In order to properly install the game, you'll need to extract the data from the 
 - **Touch Screen** - Original Touch Controls
 
 ## Known Issues
+
 - Reload/weapon touch position (Triangle) confirmed by layout only; verify in combat on hardware.
 - [Update this section prior to release with any remaining unresolved bugs]
 
@@ -53,6 +56,7 @@ In order to properly install the game, you'll need to extract the data from the 
 3. A note on exactly when it happens (on boot, which level loading, do you ever reach the menu?).
 
 ## Credits
+
 - TheFloW for the `so_loader` wrapper and Android porting boilerplate.
 - Rinnegatamante for `vitaGL` and porting tools.
 - Gameloft for the original game.

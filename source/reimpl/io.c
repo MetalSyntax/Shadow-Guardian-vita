@@ -47,6 +47,20 @@ static const char *try_fallback_1_7(const char *path, char *buffer, size_t size)
             l_info("Fallback redirect: %s -> %s", path, buffer);
             return buffer;
         }
+
+        // If path is under DATA_PATH, also check DATA_PATH "GloftSGHP/..."
+        if (strncmp(buffer, DATA_PATH, sizeof(DATA_PATH) - 1) == 0 &&
+            strncmp(buffer + sizeof(DATA_PATH) - 1, "GloftSGHP/", 10) != 0) {
+            char gloft_buf[PATH_MAX];
+            snprintf(gloft_buf, sizeof(gloft_buf), "%sGloftSGHP/%s",
+                     DATA_PATH, buffer + sizeof(DATA_PATH) - 1);
+            if (file_exists(gloft_buf)) {
+                l_info("Fallback redirect: %s -> %s", path, gloft_buf);
+                strncpy(buffer, gloft_buf, size);
+                buffer[size - 1] = '\0';
+                return buffer;
+            }
+        }
     }
     return NULL;
 }

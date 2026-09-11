@@ -580,7 +580,11 @@ void *serialize_shader(void *out, size_t *sz, shader *s, GLboolean save_bindings
 }
 
 void unserialize_shader(void *in, size_t sz, shader *s, GLboolean load_bindings) {
-	uint8_t *buf = (uint8_t *)in;
+	if (!in || sz <= sizeof(uint32_t)) {
+		s->prog = NULL;
+		return;
+	}
+	char *buf = in;
 	uint32_t matrix_uniforms_num;
 	vgl_fast_memcpy(&matrix_uniforms_num, buf, sizeof(uint32_t));
 	buf += sizeof(uint32_t) * (matrix_uniforms_num + 1);
@@ -596,8 +600,17 @@ void unserialize_shader(void *in, size_t sz, shader *s, GLboolean load_bindings)
 		buf += sizeof(glsl_samplers_info) * s->sized_samplers_num;
 	}
 #endif
-	s->size = sz - ((uintptr_t)buf - (uintptr_t)in);
+	size_t header_len = (uintptr_t)buf - (uintptr_t)in;
+	if (sz <= header_len) {
+		s->prog = NULL;
+		return;
+	}
+	s->size = sz - header_len;
 	s->prog = (SceGxmProgram *)vglMalloc(s->size);
+	if (!s->prog) {
+		vgl_log("%s:%d: %s: vglMalloc failed for shader size %u\n", __FILE__, __LINE__, __func__, (unsigned)s->size);
+		return;
+	}
 	vgl_fast_memcpy((SceGxmProgram *)s->prog, buf, s->size);
 	sceGxmShaderPatcherRegisterProgram(gxm_shader_patcher, s->prog, &s->id);
 	s->unif_buf_size = sceGxmProgramGetDefaultUniformBufferSize(s->prog);
@@ -606,9 +619,11 @@ void unserialize_shader(void *in, size_t sz, shader *s, GLboolean load_bindings)
 		uint32_t *ptr = vglProgramGetParameterBase(s->prog);
 		for (int i = 0; i < matrix_uniforms_num; i++) {
 			matrix_uniform *m = vglMalloc(sizeof(matrix_uniform));
-			m->chain = s->mat;
-			m->ptr = (SceGxmProgramParameter *)(ptr + _m[i] * 4);
-			s->mat = m;
+			if (m) {
+				m->chain = s->mat;
+				m->ptr = (SceGxmProgramParameter *)(ptr + _m[i] * 4);
+				s->mat = m;
+			}
 		}
 	}
 }
@@ -2141,11 +2156,16 @@ void glLinkProgram(GLuint progr) {
 			if (f >= 0) {
 				size_t sz = sceIoLseek(f, 0, SCE_SEEK_END);
 				sceIoLseek(f, 0, SCE_SEEK_SET);
-				void *buf = vglMalloc(sz);
-				sceIoRead(f, buf, sz);
+				if (sz > sizeof(uint32_t)) {
+					void *buf = vglMalloc(sz);
+					if (buf) {
+						if (sceIoRead(f, buf, sz) == sz) {
+							unserialize_shader(buf, sz, p->vshader, GL_TRUE);
+						}
+						vgl_free(buf);
+					}
+				}
 				sceIoClose(f);
-				unserialize_shader(buf, sz, p->vshader, GL_TRUE);
-				vgl_free(buf);
 			}
 		}
 		if (!p->fshader->prog) {
@@ -2154,11 +2174,16 @@ void glLinkProgram(GLuint progr) {
 			if (f >= 0) {
 				size_t sz = sceIoLseek(f, 0, SCE_SEEK_END);
 				sceIoLseek(f, 0, SCE_SEEK_SET);
-				void *buf = vglMalloc(sz);
-				sceIoRead(f, buf, sz);
+				if (sz > sizeof(uint32_t)) {
+					void *buf = vglMalloc(sz);
+					if (buf) {
+						if (sceIoRead(f, buf, sz) == sz) {
+							unserialize_shader(buf, sz, p->fshader, GL_TRUE);
+						}
+						vgl_free(buf);
+					}
+				}
 				sceIoClose(f);
-				unserialize_shader(buf, sz, p->fshader, GL_TRUE);
-				vgl_free(buf);
 			}
 		}
 #endif

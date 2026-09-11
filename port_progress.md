@@ -1134,3 +1134,20 @@
   escribió ya existe en `video_play()`), el siguiente sospechoso es que el decodificador HW necesite RAM
   físicamente contigua para DMA y haya que atacar la presión de CDRAM de vitaGL (p. ej. bajar MSAA 4X),
   no el allocator.
+
+### Bug #23 (triage de dumps y hotfix v1.2.1, 2026-09-11): crash en vitaGL por shader cache corrupto/OOM y crash por assets faltantes
+
+- **Dumps analizados:** `psp2core-1789127278-0x000bf024c3-eboot.bin.psp2dmp` y `psp2core-1789128950-0x000ca72983-eboot.bin.psp2dmp` (ambos en v1.2 en consola física de playtester).
+- **Causa raíz Crash 1 (`1789127278`):**
+  - Al cargar un shader cacheado (`ux0:data/shader_cache/PSVSGHD01/v1/f/35367D20FCC06B46.gxp`), `unserialize_shader` ejecutó `s->prog = vglMalloc(s->size)`.
+  - La alocación devolvió `NULL` (archivo dañado/vacío o memoria de VGL agotada tras fallar en `gpu_alloc_mapped_aligned_unsafe_for_cpu`).
+  - Sin chequear NULL, se llamó a `vgl_fast_memcpy(s->prog, buf, s->size)` -> `sceClibMemcpy(0x0, ...)` -> Data abort en `PC = 0xe0000e68` (`SceLibKernel + 0x38`).
+- **Causa raíz Crash 2 (`1789128950`):**
+  - Ocurrido ~27 min después en `GS_Loading::LoadSpritesMenu() + 0x74` (`PC = 0x981b40fc`, `R7 = 0`).
+  - `SpriteMgr::LoadSprite(Lib &, 27)` falló porque los assets de sprites (`sprites_1_7` / `sprites_1_6`) no estaban instalados en la consola del tester. La lógica nativa hace `movle r7, #0` y desreferencia `vstr s15, [r7, #292]`.
+- **Fix aplicado (v1.2.1):**
+  1. En `lib/vitagl/source/custom_shaders.c`: guards de `sz` y `NULL` en `unserialize_shader` y `glLinkProgram`. Si `vglMalloc` o el deserializado fallan, no crashea; `glLinkProgram` detecta `!prog` y recompila limpiamente desde el código fuente GLSL sobreescribiendo la caché corrupta.
+  2. En `source/utils/init.c`: validación temprana en el arranque para `sprites_1_6`/`sprites_1_7` y carpeta `res/` con cuadro de diálogo explicativo si faltan los archivos de datos en vez de dejar que el juego crashee en pantalla de carga con `C2-12828-1`.
+  3. En `source/reimpl/io.c`: soporte en `try_fallback_1_7` para subcarpetas `GloftSGHP/`.
+- **Build:** `psvita-toolkit build` compila limpio; VPK generado en `build/shadowguardian.vpk`.
+
