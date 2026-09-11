@@ -783,4 +783,318 @@
   hipótesis a descartar es el pipeline de `mem.c`'s `mmap()` (lectura real del contenido del fd hacia el
   buffer) para buffers grandes, o el propio decodificador de textura DDS/TGA del motor.
 
+### Bug #17 (fix aplicado, sin confirmar en consola, 2026-09-10): la intro (`logo.m4v`) nunca reproduce ni un frame — el fallback CDRAM→PHYCONT de `av_alloc_texture()` está roto de forma incondicional
 
+- **Síntoma:** al abrir el juego no se reproduce el video de intro. `main()` (`source/main.c`) llama
+  `gl_init()` y a continuación `video_init()` + `video_play("video/logo.m4v")`.
+- **Causa raíz (confirmada por log real + headers de vitasdk, no por hipótesis):** en
+  `logs/game_log_1789081567836.txt:874-889`, `video_play()` abre el archivo, lee 2 chunks de 65536
+  bytes y en la línea 883 falla:
+  `[error] video: texture memblock alloc FAILED on both CDRAM (0x80024309) and PHYCONT (0x80020005)
+  (req align=1048576 size=1048576 -> size=1048576)`. El loop de reproducción termina de inmediato
+  (`iterations=20, video_frames=0, audio_frames=0, elapsed=0.03s`) sin dibujar nada.
+  - `0x80024309` = `SCE_KERNEL_ERROR_NO_FREE_PHYSICAL_PAGE_CDRAM` (confirmado en
+    `/Users/metalsyntax/vitasdk/arm-vita-eabi/include/psp2/kernel/error.h`) — esperable: `gl_init()`
+    (vitaGL, vía `vglInitExtended(0, 960, 544, 6*1024*1024, SCE_GXM_MULTISAMPLE_4X)` en
+    `source/utils/glutil.c:49`) ya se llama antes que `video_play()` y consume la CDRAM disponible.
+  - `0x80020005` = `SCE_KERNEL_ERROR_INVALID_ARGUMENT` (confirmado en el mismo header; el CLI
+    `psvita-toolkit errcode 0x80020005` lo etiqueta como `SCE_KERNEL_ERROR_INVALID_FLAGS`, misma
+    familia de "argumento/flag inválido"). Esta es la causa real del bug: en `source/video.cpp`,
+    `av_alloc_texture()` arma un único `SceKernelAllocMemBlockOpt opt` con
+    `opt.attr = SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_ALIGNMENT` y `opt.alignment` custom para el intento
+    en `SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW`, y REUTILIZABA ese mismo `opt` para el fallback a
+    `SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW`. Los bloques PHYCONT no aceptan alineación custom
+    vía `opt` (ya vienen alineados naturalmente a 1MB por el kernel) y el kernel rechaza la llamada con
+    `SCE_KERNEL_ERROR_INVALID_ARGUMENT`. Efecto práctico: el fallback CDRAM→PHYCONT estaba roto de
+    forma incondicional — cualquier vez que la CDRAM esté agotada (la situación normal apenas arranca
+    el juego, con vitaGL ya inicializado), la asignación de textura del video falla siempre y la intro
+    nunca reproduce ni un frame.
+- **Fix aplicado:** en `source/video.cpp`, `av_alloc_texture()`, el intento de fallback a PHYCONT ahora
+  redondea `size` a un múltiplo de 1MB (`AV_ALIGN_MEM(size, 0x100000)`) y llama
+  `sceKernelAllocMemBlock("av_tex_phycont", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW, size, NULL)`
+  sin pasar ningún `opt` de alineación custom. El intento primario en CDRAM no se tocó (sigue
+  necesitando `opt.alignment` para el alineamiento de textura GPU que exige `SceAvPlayer`).
+  No se buscó reducir la huella de CDRAM de `vglInitExtended()` (el `ram_threshold` de 6MB en
+  `source/utils/glutil.c:49` ya le pide a vitaGL preferir RAM_PHYCONT cuando la CDRAM libre cae por
+  debajo de ese umbral) — cambiar ese parámetro es una decisión global que afecta la carga de texturas
+  de todo el juego y requiere validación en hardware real, así que se dejó fuera de este fix mínimo.
+- **Limpieza asociada:** se borraron `source/video_player.c` y `source/video_player.h` (0 bytes útiles,
+  contenían literalmente el texto `404: Not Found` de una descarga fallida, no estaban referenciados en
+  `CMakeLists.txt` ni en ningún otro archivo del proyecto).
+- **Build:** `psvita-toolkit build` compila limpio (sin warnings nuevos) con este fix.
+- [ ] Pendiente confirmar en consola física: desplegar y verificar en `game_log_*.txt` que
+  `av_alloc_texture()` ya no reporta el error doble de la línea 883, que aparece
+  `video: texture memblock ok (PHYCONT ...)` (o `CDRAM`) para `logo.m4v`, y que la intro efectivamente
+  se ve y se escucha al abrir el juego. Si el intento CDRAM también empieza a tener éxito de forma
+  consistente tras este fix (porque nunca se llegaba a loguear su fallo real antes de que rompiera el
+  fallback), no hace falta tocar el `ram_threshold` de `vglInitExtended()`; si el video sigue sin
+  reproducirse pese a que el log ahora muestre `texture memblock ok`, el siguiente sospechoso es el
+  pipeline de conversión YUV→RGB565/subida de textura GPU más abajo en `video.cpp`, no la asignación de
+  memoria.
+
+### Bug #18 (fix aplicado, sin confirmar en consola, 2026-09-10): elementos del HUD/menús reales se ocultaban junto con los botones y el joystick virtuales
+
+- **Síntoma:** al togglear (o directamente por el estado inicial de) los controles táctiles virtuales,
+  desaparecían de pantalla elementos que son parte del juego real (HUD, prompts, indicadores) y no
+  únicamente el joystick/botones virtuales.
+- **Causa raíz (confirmada cruzando el pseudo-C de Ghidra, no por hipótesis):** `source/patch.c`
+  interceptaba con un trampolín ARM el único call site de `GS_GamePlay::RenderState` que llama a
+  `GUILevel::PaintVisibleItems` (`so_mod.text_base + 0x0019c8d0`) y, cuando `g_hide_virtual_buttons`
+  era `true`, se SALTEABA LA FUNCIÓN ENTERA en vez de llamarla. Pero
+  `GUILevel::PaintVisibleItems` (`decompiled/libshadowguardian_armeabi-v7a/ghidra/out_ghidra.c:149331`)
+  es una rutina GENÉRICA que itera sobre TODOS los `m_elementsCount` ítems registrados en esa instancia
+  de `GUILevel` y pinta cada uno (`PaintRectItem`/`PaintGraphItem`) según su tipo/flags — no tiene
+  ninguna noción de "esto es un botón virtual" vs. "esto es HUD real". La misma función se llama desde
+  al menos otros 14 sitios distintos del binario (menús, diálogos, pantallas de estado — ver los
+  `GUILevel::PaintVisibleItems();` en las líneas 153186, 154270, 163226, 164565, 167931, 169468, 171208,
+  175804, 177505, 179362, 182331, 184440, 186096, 188746 del mismo archivo), confirmando que es la
+  rutina de pintado genérica de la GUI y no algo exclusivo de los controles táctiles. Saltearla entera
+  en el único call site de gameplay apagaba de un saque TODO lo que ese `GUILevel` tuviera visible ese
+  frame (vida, munición, prompts, minimapa, etc.), no solo el joystick/botones.
+- **Hallazgo secundario:** ya existía en el working tree un archivo sin trackear
+  `source/joystick_hook.c` (no listado en `CMakeLists.txt`, no wireado en `so_patch()`) con un enfoque
+  quirúrgico abandonado a medio hacer: en vez de saltear la función de pintado, hookeaba el render del
+  joystick y usaba `GUILevel::SetItemAlpha` (`_ZN8GUILevel12SetItemAlphaEjj`,
+  `decompiled/libshadowguardian_armeabi-v7a/ghidra/out_ghidra.c:155543`) para poner alpha=0 SOLO en los
+  índices de ítem del joystick base/knob y de los botones de acción, leídos de offsets conocidos del
+  struct `PlayerCtrl` (`+8`/`+0xc` joystick, arrays de 8 en `+0x68`/`+0xc8` para acciones, `+0x2c`/`+0x34`
+  extra). Se confirmó en el pseudo-C que `SetItemAlpha` escribe un campo de alpha *por ítem* (offset
+  0x34 dentro del struct del ítem) y que el propio motor ya usa esta función en otro lado (línea 158684)
+  para fundidos de UI — es una API segura y quirúrgica, no un hack.
+- **Fix aplicado:** en `source/patch.c`, se eliminó por completo el trampolín/hook sobre
+  `GUILevel::PaintVisibleItems` (ese call site ya no se toca, la función corre siempre sin parchear). El
+  hook sobre `PlayerCtrl::Render` (`so_mod.text_base + 0x0019cc68`, que sí actualiza estado real de
+  gauge/cooldown de los botones además de dibujarlos — confirmado en
+  `decompiled/libshadowguardian_armeabi-v7a/ghidra/out_ghidra.c:86940`) se reescribió para SIEMPRE
+  llamar a la función original primero, y solo si `g_hide_virtual_buttons` es `true`, aplicar después
+  `GUILevel::SetItemAlpha(guiLevel, idx, 0)` sobre los índices puntuales del joystick/botones (la lógica
+  que estaba a medio implementar en `joystick_hook.c`, ahora integrada en `in_game_player_ctrl_render()`
+  en `patch.c`). Se borró `source/joystick_hook.c` por quedar duplicado/muerto tras la integración (no
+  estaba referenciado en ningún otro archivo del proyecto).
+- **Build:** `psvita-toolkit build` compila limpio con este fix.
+- [ ] Pendiente confirmar en consola física: desplegar y verificar que, con los controles virtuales
+  ocultos (CIRCLE), el HUD/menús reales (vida, munición, prompts, etc.) permanecen visibles y solo
+  desaparecen el joystick y los botones de acción; y que con los controles virtuales visibles el
+  comportamiento no cambió respecto de antes de este fix.
+
+### Bug #19 (fix aplicado, sin confirmar en consola, 2026-09-10): Data abort dentro de `GUILevel::SetItemAlpha` al arrancar el nivel (regresión del fix del Bug #18)
+
+- **Síntoma:** crash justo al terminar de cargar el nivel, antes de llegar al gameplay visible (el log
+  `game_log_1789084690672.txt` corta en medio de la apertura repetida de
+  `music//m_cinematic_action.wav`, inmediatamente después de `INFO: level successfully loaded` y del
+  linkeo de los shaders `aim_rifle_blur`/`aim_sniper_blur` — es decir, durante la cinemática/transición
+  de entrada al gameplay, no en un menú).
+- **Dump analizado:** `logs/shadowguardian-psp2core-1789084733-0x00049e2337-eboot.bin.psp2dmp`
+  (parseado con `vita-parse-core` contra `build/shadowguardian.elf`, mismo build que generó el dump
+  según timestamps). Excepción: Data abort. `LR = 0x81006ec5` cae en
+  `in_game_player_ctrl_render+0xe5` (`shadowguardian@1`, el loader) — justo después de una de las
+  instrucciones `blx r3` que llaman a `GUILevel_SetItemAlpha_func(guiLevel, idx, 0)` agregadas en el fix
+  del Bug #18. El `PC` real (0x98198524) no resuelve contra el `.elf` del loader porque cae dentro del
+  `.so` del juego, cargado en `so_mod.text_base = 0x98000000`; resolviendo el offset (`0x198524`) contra
+  la tabla de símbolos dinámicos de `libshadowguardian.so` (`objdump -T`) da
+  `GUILevel::SetItemAlpha(unsigned int, unsigned int)+0x48` exacto.
+- **Causa raíz (confirmada cruzando el pseudo-C de Ghidra):**
+  `decompiled/libshadowguardian_armeabi-v7a/ghidra/out_ghidra.c:155543` muestra que
+  `GUILevel::SetItemAlpha` chequea `if (*(uint *)(this + 0xc) <= param_1)` (es decir,
+  `idx >= m_elementsCount`) pero ese chequeo **no es un assert que corta la ejecución** — solo llama a
+  `pig::System::ShowMessageBox(...)` (un log de error, ver mismo patrón repetido por todo el archivo,
+  p.ej. línea 87008 dentro de `PlayerCtrl::Render` original) y **sigue de largo** dereferenciando
+  `*(int *)(iVar3 + param_1 * 4)` con el índice fuera de rango — esto es lo que causa el Data abort
+  cuando `idx` es un valor grande fuera de rango.
+  El código agregado en el Bug #18 (`in_game_player_ctrl_render()` en `source/patch.c`) lee los índices
+  de joystick/botones de acción desde offsets de `PlayerCtrl` reconstruidos por inspección
+  (`+8`/`+0xc` joystick, `+0x68`/`+0xc8` arrays de 8 elementos de acciones, `+0x2c`/`+0x34` extra) y
+  solo trata `0xFFFFFFFF` como "sin asignar". Pero
+  `PlayerCtrl::PlayerCtrl()` (`decompiled/libshadowguardian_armeabi-v7a/ghidra/out_ghidra.c:85342`)
+  inicializa `*(this + 0x68) = 0x3f800000` (el patrón de bits de la constante float `1.0f`, no un
+  sentinel de índice) y no fija `0xFFFFFFFF` en ese rango del array de acciones — antes de que
+  `RebuildActionCircle`/equivalente corra por primera vez (que en el arranque del nivel puede ser
+  después del primer par de frames de la cinemática de entrada, cuando `PlayerCtrl::Render` ya se está
+  llamando), ese campo vale literalmente `0x3f800000` (1065353216 en decimal), un índice absurdamente
+  fuera de rango que el chequeo no-fatal del motor deja pasar igual.
+- **Fix aplicado:** en `source/patch.c`, se agregó `gui_level_set_item_alpha_safe()`, que replica el
+  bound check real de `GUILevel::SetItemAlpha` (`idx < *(uint32_t*)(guiLevel + 0xc)`) mirando
+  `m_elementsCount` del `GUILevel` de destino y **absteniéndose de llamar** a
+  `GUILevel_SetItemAlpha_func` si el índice está fuera de rango, en vez de confiar en el assert no-fatal
+  del motor. Los 6 call sites en `in_game_player_ctrl_render()` (joystick base/knob, 2×8 botones de
+  acción, extra 1/2) ahora pasan por este wrapper.
+- **Build:** `psvita-toolkit build` compila limpio con este fix.
+- [ ] Pendiente confirmar en consola física: desplegar, reproducir la misma secuencia (cargar este
+  nivel hasta la cinemática de entrada) y verificar que ya no aparece un `.psp2dmp` nuevo en ese punto,
+  y que el `game_log` sigue más allá de `INFO: level successfully loaded` hasta ver texto de gameplay
+  real. Si el crash persiste en el mismo punto pese al bounds check, el siguiente sospechoso es que
+  `guiLevel` en sí (`*(void**)(playerCtrl + 4)`) sea el offset equivocado (no `GUILevel*` real) en este
+  punto temprano del ciclo de vida, no los índices.
+- **UPDATE 2026-09-10 (mismo día, después de desplegar el fix de arriba): el crash persistió, en el
+  MISMO punto exacto** — confirma la sospecha anotada arriba.
+
+### Bug #19b (fix aplicado, sin confirmar en consola, 2026-09-10): confirmado que `guiLevel` (`*(void**)(playerCtrl+4)`) nunca fue un `GUILevel*` real — todo el mecanismo de `GUILevel::SetItemAlpha` manual se reemplazó por la API real del motor
+
+- **Síntoma:** con el fix del Bug #19 ya desplegado, mismo crash exacto en el mismo frame (dump
+  `logs/shadowguardian-psp2core-1789085647-0x0003332bcd-eboot.bin.psp2dmp`, log
+  `logs/game_log_1789085604919.txt`, corta en el mismo punto que el Bug #19 tras
+  `INFO: level successfully loaded`). El bounds check agregado en el Bug #19
+  (`gui_level_set_item_alpha_safe`) SÍ dejó pasar la llamada esta vez (`LR` cae justo después del
+  `blx r3` DENTRO de `gui_level_set_item_alpha_safe`, no en `in_game_player_ctrl_render` directamente),
+  pero `GUILevel::SetItemAlpha` crasheó en el mismo offset exacto (`+0x48`) de todos modos.
+- **Causa raíz real (esta vez confirmada con desensamblado ARM real, no pseudo-C):**
+  `GUILevel::SetItemAlpha` es código **ARM, no Thumb** (`arm-vita-eabi-objdump -d` sin
+  `-M force-thumb` sobre `0x1984dc` en `libshadowguardian.so` da un prólogo `push {r4,r5,r6,lr}`
+  coherente; con `-M force-thumb` se desensambla como basura). La instrucción exacta en `+0x48`
+  (`0x198524`) es `ldrsh r2, [r2]` con `r2 = *(int*)(*(int*)guiLevel + idx*4)` — es decir, el bounds
+  check (`idx < m_elementsCount`) pasó, pero el ITEM en ese índice del array de `guiLevel` es un
+  puntero inválido. El registro `r3` en el momento del crash (`= *(int*)guiLevel`, la base del array de
+  items) valía **exactamente** `0x98304304`, que resuelve (vía `objdump -T` sobre el `.so`) al símbolo
+  `_ZN4ustl8memblockD1Ev` (`ustl::memblock::~memblock()`) — **una dirección de CÓDIGO**, no un array de
+  punteros a ítems. Esto prueba que `guiLevel` (leído de `playerCtrl+4`) NUNCA fue un `GUILevel*` real:
+  esa lectura caía sobre otro campo/objeto de `PlayerCtrl` cuyo primer `int` coincide por casualidad con
+  una dirección de código real del binario.
+  Confirmado cruzando el pseudo-C real de `PlayerCtrl::Render()`
+  (`decompiled/libshadowguardian_armeabi-v7a/ghidra/out_ghidra.c:86940`): el motor NUNCA obtiene su
+  `GUILevel*` de `PlayerCtrl` — lo obtiene de `Singleton<GS_GamePlay>::s_instance + 0x6c` (después de
+  chequear un estado en `+0x68` contra el rango `[0x13, 0x14]`). El guessing de offsets hecho en el
+  código heredado de `joystick_hook.c` (integrado en el Bug #18) nunca fue verificado contra el
+  desensamblado real y estaba mal en la fuente del `GUILevel*`, no solo en los índices.
+- **Fix aplicado (reemplazo completo, no otro parche encima):** se encontró que el juego YA TIENE una
+  API pública de alto nivel para esto —
+  `GS_GamePlay::SetButtonsVisible(bool)` (`_ZN11GS_GamePlay17SetButtonsVisibleEb`,
+  `decompiled/libshadowguardian_armeabi-v7a/ghidra/out_ghidra.c:159952`) — que itera los 8
+  `ButtonEnum` (0..7, donde el 0 es el joystick — confirmado en `GS_GamePlay::SetButtonEnabled` línea
+  158933, que llama `Joystick::Init` para `param_1==0`) y llama a `GUILevel::SetItemVisible` con los
+  índices y el `GUILevel*` CORRECTOS (obtenido de `Singleton<GUIMgr>::s_instance`, otra fuente más,
+  confirmando que ni `PlayerCtrl` ni `GS_GamePlay` directamente son la única fuente — hay que dejar que
+  el propio motor resuelva esto, no adivinarlo). Es la misma función que el juego real usa para ocultar
+  los controles durante QTEs (`GS_GamePlay::StartQTE`/`EndQTE`), así que está probada en el binario
+  shippeado.
+  En `source/patch.c`: se eliminó por completo `in_game_player_ctrl_render()`,
+  `gui_level_set_item_alpha_safe()`, y el trampolín/hook sobre el call site de `PlayerCtrl::Render`
+  en `so_patch()` (ya no hace falta interceptar el render en absoluto). Se agregó
+  `bool set_virtual_buttons_visible(bool visible)`, que resuelve por símbolo
+  `_ZN11GS_GamePlay17SetButtonsVisibleEb` y `_ZN9SingletonI11GS_GamePlayE10s_instanceE`, y llama a la
+  función real del juego — devuelve `false` sin crashear si el singleton todavía no existe (menú/carga).
+  En `source/main.c`: el toggle de CIRCLE ahora llama a `set_virtual_buttons_visible(!g_hide_virtual_buttons)`
+  directamente (ya no depende de ningún hook de render). Como `GS_GamePlay` no existe hasta que arranca
+  el nivel, se agregó un reintento liviano una vez por frame en el loop principal
+  (`virtual_buttons_state_synced`) para aplicar el estado inicial (`g_hide_virtual_buttons = true` por
+  default) apenas el singleton pasa a existir, sin loguear ni hacer nada mientras tanto.
+- **Build:** `psvita-toolkit build` compila limpio con este fix.
+- [ ] Pendiente confirmar en consola física: desplegar y reproducir la carga de este nivel hasta pasar
+  la cinemática de entrada sin `.psp2dmp` nuevo, y confirmar con CIRCLE que los controles
+  virtuales se ocultan/muestran correctamente en pantalla. Nota para el futuro: si se cambia de nivel
+  (el `GS_GamePlay` singleton se destruye/recrea), el estado de visibilidad podría no persistir
+  automáticamente al nuevo nivel más allá del primer re-sync -- no confirmado todavía si hace falta
+  resetear `virtual_buttons_state_synced` en las transiciones de nivel.
+
+### Bug #20 (fix aplicado, sin confirmar en consola, 2026-09-11): al ocultar los controles virtuales (CIRCLE), el personaje dejaba de responder a los controles FÍSICOS
+
+- **Síntoma:** con el fix del Bug #19b ya desplegado (llamar a `GS_GamePlay::SetButtonsVisible(bool)`
+  para ocultar el joystick/botones virtuales), el crash desapareció, pero al ocultar los controles con
+  CIRCLE el personaje dejaba de moverse y de ejecutar acciones con los botones FÍSICOS de la Vita —
+  justo lo que se quería evitar (los controles físicos deben funcionar siempre, se vean o no los
+  gráficos táctiles en pantalla).
+- **Causa raíz (confirmada leyendo el pseudo-C real, no por hipótesis):**
+  `GS_GamePlay::SetButtonVisible(ButtonEnum, bool)`
+  (`decompiled/libshadowguardian_armeabi-v7a/ghidra/out_ghidra.c:159975`) llama primero a
+  `SetButtonEnabled(this, param_1, param_2)` (línea 158922) ANTES de tocar cualquier
+  `GUILevel::SetItemVisible`. `SetButtonEnabled` no es puramente visual: para el botón 1 llama a
+  `Joystick::Init(*(Joystick**)(Singleton<PlayerCtrl>::s_instance+0x88), -1, -1)` (línea 145393),
+  que reinicializa/resetea la posición trackeada del joystick, y para los botones 2 a 7 llama a
+  `ActionManager::OnActionReleased(...)`, forzando que esa acción se libere. O sea: `SetButtonsVisible`
+  (que internamente llama a `SetButtonVisible` para los 8 `ButtonEnum`) no solo oculta gráficos —
+  también resetea/libera el estado real de joystick y acciones cada vez que se llama, lo cual
+  desincroniza el puente físico→touch sintético que usa este port para mapear los controles de la
+  Vita.
+- **Fix aplicado:** en `source/patch.c`, se reescribió `set_virtual_buttons_visible()` para dejar de
+  llamar a `GS_GamePlay::SetButtonsVisible`/`SetButtonVisible`/`SetButtonEnabled` por completo. Ahora
+  replica ÚNICAMENTE las llamadas a `GUILevel::SetItemVisible` del switch de `SetButtonVisible`
+  (`out_ghidra.c:159994-160074`), obteniendo el `GUILevel*` de la MISMA fuente que usa el motor ahí
+  (`Singleton<GUIMgr>::s_instance` → `+8` → `+0x4c`, símbolo `_ZN9SingletonI6GUIMgrE10s_instanceE`,
+  NO desde `GS_GamePlay` ni `PlayerCtrl` — ya se aprendió de la manera difícil, con un crash real en
+  consola, que hay que confirmar contra el pseudo-C exactamente cuál objeto tiene el puntero, no
+  adivinar), con los mismos índices constantes hardcodeados por botón y el flag de "control scheme"
+  (`*(uint32_t*)(gs_instance+0x30)`) que el switch original consulta. Se agregó un bounds check
+  defensivo (`idx < m_elementsCount`) en cada llamada a `SetItemVisible`, porque esa función tiene el
+  mismo patrón de assert no-fatal-y-sigue-de-largo que causó el crash de `SetItemAlpha` en los Bugs
+  #19/#19b. El botón 0 (joystick) no tiene ítem de `GUILevel` propio en el switch original
+  (`case 0: return;`), así que no hace falta tocar nada visual para él tampoco. Se dejó afuera
+  deliberadamente el llamado extra de "mostrar" del botón 7 (`PlayerCtrl::UpdateWeaponGUI()`) por estar
+  fuera de alcance de este fix — en el peor caso un ícono de arma se ve desactualizado un frame, no es
+  un bug de input.
+- **Build:** `psvita-toolkit build` compila limpio con este fix.
+- [ ] Pendiente confirmar en consola física: desplegar, ocultar/mostrar los controles con CIRCLE varias
+  veces durante gameplay, y verificar que (a) los gráficos del joystick/botones se ocultan y muestran
+  correctamente, y (b) el personaje sigue respondiendo a los controles físicos (mover, disparar, apuntar,
+  acciones contextuales) en todo momento, sin importar si los controles virtuales están ocultos o no.
+
+### Bug #21 (fix aplicado, sin confirmar en consola, 2026-09-11): crash (Data abort, NULL deref) en `SoundMgr::Update()` al elegir "Salir" (Exit) desde el menú del juego
+
+- **Síntoma:** el usuario reporta un crash al cerrar el juego "sin el botón PS" — es decir, usando el
+  botón/opción de salir nativo del propio juego/menú, no el suspend/exit de la Vita.
+- **Log analizado (`logs/game_log_1789098606601.txt`):** la secuencia real, en orden, fue: el usuario
+  está en el menú (`menu.bclara` cargado), suena `sfx_menu_confirm.wav` (click de "Salir"/Exit
+  confirmado), el motor loguea `### Shutting down` (su propia secuencia de apagado empieza: para hilos
+  de audio con `AudioTrack release/stop`, etc.), y recién ahí llama al JNI `Exit()`
+  (`[Java] game requested Exit / sendAppToBackground (id=2)`, ver `source/java.c`, `method_exit()`).
+  Inmediatamente después aparece
+  `[error] [ALOG][SHADOW] Error!!!! Exp: s_instance, ... Singleton.h, Line: 34` — el patrón ya conocido
+  de este motor: un assert de `Singleton::s_instance == NULL` que solo loguea (no es fatal) y el código
+  sigue de largo igual.
+- **Causa raíz (confirmada con `.psp2dmp` real, no por hipótesis):**
+  `logs/shadowguardian-psp2core-1789098820-0x0001da2fcf-eboot.bin.psp2dmp`, parseado con
+  `vita-parse-core` contra `build/shadowguardian.elf`: Data abort, `R0 = 0x0`, `PC = 0x98254a34`
+  (`libshadowguardian.so`, offset `0x254a34` sobre `text_base=0x98000000`), que resuelve por
+  `objdump -T` + `c++filt` a `SoundMgr::Update()+0x1c`; `LR = 0x980bf798` resuelve a
+  `Game::FrameUpdate()+0x80`. El pseudo-C de `SoundMgr::Update`
+  (`decompiled/libshadowguardian_armeabi-v7a/ghidra/out_ghidra.c:276485`) confirma que lo primero que
+  hace tras `vox::VoxEngine::Update()` es `*(int *)(in_r0 + 0xd8)` — con `in_r0` (el `this` de
+  `SoundMgr`) en `NULL`, eso es exactamente el Data abort observado.
+  En conjunto, la causa raíz es: `method_exit()` (el stub de FalsoJNI para el JNI `Exit()`/
+  `sendAppToBackground()` del motor) solo logueaba y devolvía el control al `.so` **sin terminar el
+  proceso**. En Android real, esa llamada JNI ocurre justo antes de que la Activity termine y el
+  proceso muera — el motor YA asume que el proceso no va a seguir vivo y por eso destruye sus propios
+  singletons (`SoundMgr` incluido) como parte de `### Shutting down`. Como nuestro stub no mataba el
+  proceso, `Game::FrameUpdate()` seguía corriendo al menos un frame más y llamaba a
+  `SoundMgr::Update()` con el singleton ya nulo/destruido.
+- **Fix aplicado:** en `source/java.c`, `method_exit()` ahora llama a `logger_flush()` +
+  `sceKernelExitProcess(0)` después de loguear — el mismo patrón de apagado limpio que ya usa
+  `fatal_error()` en `source/utils/dialog.c`. Esto garantiza que el `.so` nunca vuelve a ejecutar otro
+  frame después de que su propia secuencia de shutdown asume que el proceso ya terminó.
+- **Build:** `psvita-toolkit build` compila limpio con este fix.
+- [ ] Pendiente confirmar en consola física: desplegar, entrar al menú, elegir "Salir"/Exit, y verificar
+  que la consola vuelve limpiamente a LiveArea sin generar un `.psp2dmp` nuevo. Nota: `method_exit()`
+  también es el handler para `sendAppToBackground` (mismo `MID_EXIT`, ver `source/java.c`) — FalsoJNI no
+  puede distinguir cuál de los dos métodos Java disparó la llamada (comparten el mismo `jmethodID`), así
+  que este fix también terminará el proceso si el motor llega a invocar `sendAppToBackground` en algún
+  otro contexto (p. ej. simulando una interrupción tipo llamada telefónica) en vez de un "Salir" real
+  del usuario. No se encontró en el log analizado ningún caso de `sendAppToBackground` disparándose
+  fuera de un Exit real, pero si en consola aparece un cierre inesperado del juego en un contexto que NO
+  sea el menú "Salir", ese es el siguiente sospechoso.
+
+
+
+### Bug #10 (confirmado 2026-09-11): Opacidad de botones virtuales ("sombra azul" del joystick)
+- **Síntoma:** Al ocultar los botones virtuales presionando CIRCULO, quedaba una sombra azul visible (la base del joystick virtual), y el usuario quería ocultar **todos** los botones gráficos pero conservando su funcionalidad real para controles físicos. Hubo un intento previo usando opacidad forzada que provocó un crash.
+- **Causa raíz:** `GUILevel::SetItemVisible` dejaba elementos sin ocultar correctamente o era sobreescrito por la lógica del motor. Adicionalmente, el índice del joystick (Button 0) no se ocultaba completamente (solo la base o solo el centro dependiendo del esquema). El crash anterior con la "opacidad forzada" se debió a invocar `GUILevel::SetItemAlpha` sin comprobar primero el límite `m_elementsCount`, un fallo ya documentado en este port.
+- **Fix aplicado (`source/patch.c`):**
+  - Se cambió `set_virtual_buttons_visible` para usar `GUILevel::SetItemAlpha` (`_ZN8GUILevel12SetItemAlphaEjj`) en lugar de `SetItemVisible`.
+  - Se agregó una envoltura de seguridad `set_item_alpha_safe` que verifica `idx < elementsCount` antes de llamar a la función, evadiendo así el crash por desreferencia de puntero fuera de límites que tiene el propio juego (similar al error en SetItemVisible).
+  - Se incluyeron ambos índices `0` y `1` explícitamente para asegurar que tanto la base como el botón central del joystick desaparezcan sin dejar restos azules.
+  - Al reducir la transparencia al valor `0` (en lugar de desactivar la visibilidad) se garantiza que el gestor de eventos táctiles siga procesando toques en esas áreas si fuera necesario, sin entorpecer el input.
+- **Estado:** Implementado y compilado (eboot.bin generado con éxito). Listo para prueba en consola real.
+- **Mejora (2026-09-11):** Se refinó el comportamiento de ocultar los controles virtuales. Ahora el arma de la esquina superior derecha se mantiene visible, y se aseguran todos los botones de acción e interfaz de la mitad derecha (incluido el de apuntar, cubriendo índices del 0 al 10). También se amplió el rango del joystick derecho (cámara) de 100 a 250 para permitir movimientos y giros de cámara más rápidos.
+
+### Intento Actual (2026-09-11): Refinamiento de Interfaz Gráfica y Joystick Derecho [ESTADO: EN PRUEBAS / NO FINALIZADO]
+**Objetivo:** Lograr una inmersión completa ocultando estrictamente los botones virtuales táctiles (joystick izquierdo, botones de acción derechos como apuntar/disparar/cubrirse/saltar) sin perder el HUD fundamental (como el selector de armas) y mejorar la sensibilidad de la cámara (joystick derecho).
+
+**Historial de modificaciones aplicadas hasta el momento:**
+1. **Corrección del crash por opacidad (`source/patch.c`):**
+   - El juego sufría un crash (Out-Of-Bounds) nativo en la función `GUILevel::SetItemAlpha` si se pasaban índices incorrectos.
+   - Se resolvió implementando una función segura (`set_item_alpha_safe`) que verifica que el índice sea menor a `m_elementsCount` antes de llamar a `_ZN8GUILevel12SetItemAlphaEjj`. Esto permitió usar la opacidad para ocultar gráficos sin desactivar la detección de toques sintéticos, corrigiendo de paso el rastro de la "sombra azul" del joystick (ocultando los índices 0 y 1).
+2. **Ajuste de elementos a ocultar:**
+   - **Arma visible:** Se eliminó la lógica que ocultaba el grupo del `ButtonEnum 7` (índices `0xb`, `0x1c`, `0x1d`, etc.) para asegurar que el arma en la esquina siempre permanezca visible.
+   - **Botón de apuntar y acciones:** Para resolver el problema de botones de acción "rebeldes" (como el de apuntar que no desaparecía), se reemplazó la lógica condicional por un barrido incondicional de los elementos gráficos del `0` al `10`. Esto garantiza ocultar el joystick y los 4 botones de acción principales independientemente del `control_scheme` seleccionado en el menú del juego.
+3. **Mejora del límite de cámara (`source/main.c`):**
+   - El stick derecho simula un desplazamiento táctil (swipe) continuo en la pantalla. Su rango máximo estaba limitado a `100` píxeles (`dz_rescale(rx, 100)`), lo que provocaba una velocidad de paneo lenta.
+   - Se amplió este límite a `250` píxeles para ambos ejes, incrementando teóricamente en un 150% la distancia del deslizamiento virtual, lo cual debería traducirse en un giro de cámara mucho más fluido y rápido.
+
+*Nota: Estos cambios han compilado correctamente en `eboot.bin`, pero **aún están a la espera de confirmación real en la consola** para validar que el mapeo, la cámara y el HUD reaccionan exactamente como se espera.*

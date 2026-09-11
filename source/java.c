@@ -22,6 +22,20 @@ static void method_void_stub(jmethodID id, va_list args) {
 static void method_exit(jmethodID id, va_list args) {
     (void)args;
     l_info("[Java] game requested Exit / sendAppToBackground (id=%d)", (int)id);
+
+    // On Android this JNI call is followed by the Activity finishing / the process being
+    // killed by the OS. Our stub used to just log and return, leaving control right back
+    // inside the .so's own game loop -- but the engine's shutdown sequence (visible in the
+    // log right before this call as "### Shutting down") already tears down its own
+    // singletons (SoundMgr among them) on the assumption the process is about to die. With
+    // no real process death, Game::FrameUpdate() runs at least one more frame and calls
+    // SoundMgr::Update() with a NULL "this" -- confirmed via psp2dmp
+    // (shadowguardian-psp2core-1789098820-0x0001da2fcf): Data abort, R0=0x0, PC resolves to
+    // SoundMgr::Update()+0x1c (dereferences this+0xd8), LR to Game::FrameUpdate()+0x80.
+    // Actually terminating here, like fatal_error() does in utils/dialog.c, matches what
+    // the .so's shutdown code already assumes happened.
+    logger_flush();
+    sceKernelExitProcess(0);
 }
 
 static jobject object_dummy(jmethodID id, va_list args) {

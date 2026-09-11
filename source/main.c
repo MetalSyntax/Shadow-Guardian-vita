@@ -7,6 +7,7 @@
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/ctrl.h>
+#include "video.h"
 #include <psp2/touch.h>
 #include <psp2/power.h>
 
@@ -24,7 +25,10 @@ unsigned int sceUserMainThreadStackSize = 2 * 1024 * 1024;
 int sceLibcHeapSize = 32 * 1024 * 1024;
 #endif
 
+#include <stdbool.h>
+
 so_module so_mod;
+bool g_hide_virtual_buttons = true;
 
 #define SCREEN_W 800
 #define SCREEN_H 480
@@ -142,7 +146,7 @@ static void resolve_entrypoints(void) {
 #define F_JOY_R    50
 // Deadzone (analog units, 0..128): 20 absorbs stick drift/noise without
 // hurting response; output is rescaled so full deflection = full radius.
-#define F_JOY_DZ   20
+#define F_JOY_DZ   40
 
 #define F_CAM_X    583
 #define F_CAM_Y    240
@@ -214,6 +218,9 @@ int main(void) {
 
     gl_init();
     l_info("vitaGL initialized successfully.");
+    
+    video_init();
+    video_play("video/logo.m4v");
 
     audio_init();
 
@@ -282,8 +289,17 @@ int main(void) {
     int fire_on = 0, aim_on = 0, act_on = 0, cover_on = 0, wpn_on = 0;
 
     l_info("Entering main render loop...");
+    bool virtual_buttons_state_synced = false;
     while (1) {
         sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DEFAULT);
+
+        // GS_GamePlay (and its GUILevel) only exists once a level is loaded, so the initial
+        // g_hide_virtual_buttons default can't be applied at startup -- keep retrying once per
+        // frame (cheap: two NULL checks once resolved) until gameplay actually begins.
+        if (!virtual_buttons_state_synced) {
+            extern bool set_virtual_buttons_visible(bool visible);
+            virtual_buttons_state_synced = set_virtual_buttons_visible(!g_hide_virtual_buttons);
+        }
 
         // Physical controls -> native keys + synthetic touches.
         if (sceCtrlPeekBufferPositive(0, &pad, 1) > 0) {
@@ -291,6 +307,12 @@ int main(void) {
             current_buttons = pad.buttons;
             uint32_t pressed = current_buttons & ~old_buttons;
             uint32_t released = ~current_buttons & old_buttons;
+
+            if (pressed & SCE_CTRL_CIRCLE) {
+                g_hide_virtual_buttons = !g_hide_virtual_buttons;
+                extern bool set_virtual_buttons_visible(bool visible);
+                set_virtual_buttons_visible(!g_hide_virtual_buttons);
+            }
 
             // START -> KEYCODE_BACK (4): pause / back in menus.
             // NOTE: CIRCLE no longer sends BACK (old behaviour); it is the
@@ -325,49 +347,65 @@ int main(void) {
             // ACT contextual (jump/run/grab/climb): CROSS (hold/tap).
             synth_button(pressed, released, SCE_CTRL_CROSS,
                          &act_on, FID_ACT, F_ACT_X, F_ACT_Y);
-            // Cover/crouch: CIRCLE (hold/tap).
-            synth_button(pressed, released, SCE_CTRL_CIRCLE,
-                         &cover_on, FID_COVER, F_COVER_X, F_COVER_Y);
+            // D-Pad -> Native DPAD Keys for Menu Navigation
+            if (pressed & SCE_CTRL_UP) nativeOnKeyDown(&jni, NULL, 19);
+            if (released & SCE_CTRL_UP) nativeOnKeyUp(&jni, NULL, 19);
+
+            if (pressed & SCE_CTRL_DOWN) nativeOnKeyDown(&jni, NULL, 20);
+            if (released & SCE_CTRL_DOWN) nativeOnKeyUp(&jni, NULL, 20);
+
+            if (pressed & SCE_CTRL_LEFT) nativeOnKeyDown(&jni, NULL, 21);
+            if (released & SCE_CTRL_LEFT) nativeOnKeyUp(&jni, NULL, 21);
+
+            if (pressed & SCE_CTRL_RIGHT) nativeOnKeyDown(&jni, NULL, 22);
+            if (released & SCE_CTRL_RIGHT) nativeOnKeyUp(&jni, NULL, 22);
+
             // Weapon switch: TRIANGLE (tap).
             synth_button(pressed, released, SCE_CTRL_TRIANGLE,
                          &wpn_on, FID_WPN, F_WPN_X, F_WPN_Y);
-
-            // Left stick + Dpad -> virtual joystick (finger FID_JOY).
-            // Dpad gives a digital fallback sharing the same touch point.
-            int lx = (int)pad.lx - 128;
-            int ly = (int)pad.ly - 128;
-            if (current_buttons & SCE_CTRL_LEFT)  lx -= 128;
-            if (current_buttons & SCE_CTRL_RIGHT) lx += 128;
-            if (current_buttons & SCE_CTRL_UP)    ly -= 128;
-            if (current_buttons & SCE_CTRL_DOWN)  ly += 128;
-            if (lx < -128) lx = -128;
-            if (lx >  127) lx =  127;
-            if (ly < -128) ly = -128;
-            if (ly >  127) ly =  127;
-            int ox = dz_rescale(lx, F_JOY_R);
-            int oy = dz_rescale(ly, F_JOY_R);
-            if (ox != 0 || oy != 0) {
-                joy_x = F_JOY_CX + ox;
-                joy_y = F_JOY_CY + oy;
-                if (!joy_active) {
-                    joy_active = 1;
-                    synth_touch(1, joy_x, joy_y, FID_JOY);
-                } else {
-                    synth_touch(2, joy_x, joy_y, FID_JOY);
+            // Left stick -> virtual joystick (finger FID_JOY).
+            // Only generate touch events if we are in-game (GUI is visible),
+            // otherwise stick drift can click things in the main menu.
+            extern bool *s_isGUIVisible_ptr;
+            bool in_game = s_isGUIVisible_ptr ? *s_isGUIVisible_ptr : true;
+            
+            if (in_game) {
+                int lx = (int)pad.lx - 128;
+                int ly = (int)pad.ly - 128;
+                if (lx < -128) lx = -128;
+                if (lx >  127) lx =  127;
+                if (ly < -128) ly = -128;
+                if (ly >  127) ly =  127;
+                int ox = dz_rescale(lx, F_JOY_R);
+                int oy = dz_rescale(ly, F_JOY_R);
+                if (ox != 0 || oy != 0) {
+                    joy_x = F_JOY_CX + ox;
+                    joy_y = F_JOY_CY + oy;
+                    if (!joy_active) {
+                        joy_active = 1;
+                        synth_touch(1, joy_x, joy_y, FID_JOY);
+                    } else {
+                        synth_touch(2, joy_x, joy_y, FID_JOY);
+                    }
+                } else if (joy_active) {
+                    joy_active = 0;
+                    joy_x = F_JOY_CX;
+                    joy_y = F_JOY_CY;
+                    synth_touch(0, joy_x, joy_y, FID_JOY);
                 }
             } else if (joy_active) {
+                // If we entered menu while holding stick, release it
                 joy_active = 0;
-                joy_x = F_JOY_CX;
-                joy_y = F_JOY_CY;
                 synth_touch(0, joy_x, joy_y, FID_JOY);
             }
 
             // Right stick -> free-look camera drag (finger FID_CAM).
             // Anchor in the middle of the right half; deflect to drag.
+            // Increased dz_rescale radius from 100 to 250 to fix limited camera movement speed.
             int rx = (int)pad.rx - 128;
             int ry = (int)pad.ry - 128;
-            int cox = dz_rescale(rx, 100);
-            int coy = dz_rescale(ry, 100);
+            int cox = dz_rescale(rx, 250);
+            int coy = dz_rescale(ry, 250);
             if (cox != 0 || coy != 0) {
                 cam_x = F_CAM_X + cox;
                 cam_y = F_CAM_Y + coy;

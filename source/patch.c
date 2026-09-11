@@ -22,6 +22,7 @@
 #include <unistd.h>
 
 extern so_module so_mod;
+bool *s_isGUIVisible_ptr = NULL;
 
 // Not exposed in so_util.h, but not static in so_util.c either -- reused here to place
 // our SWP-replacement trampolines in the same code cave so_util itself uses for relocation
@@ -259,7 +260,91 @@ static void patch_game_framerender(void) {
     l_info("Patched Game::FrameRender null-deref guard -> trampoline at 0x%08X", (unsigned int) patch_addr);
 }
 
+static void (*GUILevel_SetItemVisible_func)(void *guiLevel, uint32_t idx, bool visible) = NULL;
+static void **GUIMgr_s_instance_ptr = NULL;
+static void **GS_GamePlay_s_instance_ptr = NULL;
+
+// GS_GamePlay::SetButtonVisible() (decompiled/libshadowguardian_armeabi-v7a/ghidra/
+// out_ghidra.c:159975) reads its GUILevel* from the GUIMgr singleton, NOT from GS_GamePlay or
+// PlayerCtrl -- confirmed the hard way (psp2dmp) that guessing which object holds this pointer
+// crashes on hardware, so this must match the decompiled source exactly:
+// this_00 = *(GUILevel**)(*(int*)(Singleton<GUIMgr>::s_instance + 8) + 0x4c)
+static void *get_gameplay_gui_level(void) {
+    if (!GUIMgr_s_instance_ptr) {
+        GUIMgr_s_instance_ptr = (void **)so_symbol(&so_mod, "_ZN9SingletonI6GUIMgrE10s_instanceE");
+    }
+    if (!GUIMgr_s_instance_ptr) {
+        return NULL;
+    }
+    void *gui_mgr = *GUIMgr_s_instance_ptr;
+    if (!gui_mgr) {
+        return NULL;
+    }
+    void *inner = *(void **)((uintptr_t)gui_mgr + 8);
+    if (!inner) {
+        return NULL;
+    }
+    return *(void **)((uintptr_t)inner + 0x4c);
+}
+
+static void (*GUILevel_SetItemAlpha_func)(void *guiLevel, uint32_t idx, uint32_t alpha) = NULL;
+
+// GUILevel::SetItemAlpha (out_ghidra.c:155541) expects the item index and an alpha value (0-255).
+// We bounds-check against m_elementsCount to avoid the hardware crash that happens if we 
+// pass out-of-bounds indices.
+static inline void set_item_alpha_safe(void *guiLevel, uint32_t idx, uint32_t alpha) {
+    if (!GUILevel_SetItemAlpha_func) {
+        return;
+    }
+    uint32_t elementsCount = *(uint32_t *)((uintptr_t)guiLevel + 0xc);
+    if (idx < elementsCount) {
+        GUILevel_SetItemAlpha_func(guiLevel, idx, alpha);
+    }
+}
+
+// Hide/show ONLY the on-screen graphics of the virtual joystick + action buttons by forcing opacity (alpha).
+// SetItemVisible left a blue shadow for the joystick base; setting alpha to 0 hides it completely.
+// Returns true if the engine actually applied the change (GUIMgr/GS_GamePlay singletons were
+// alive, i.e. we're in gameplay); false if there is currently no gameplay session (main menu,
+// loading screen) to apply it to -- callers that need the state applied as soon as gameplay
+// starts should keep retrying once per frame until this returns true.
+bool set_virtual_buttons_visible(bool visible) {
+    if (!GUILevel_SetItemAlpha_func) {
+        GUILevel_SetItemAlpha_func = (void *)so_symbol(&so_mod, "_ZN8GUILevel12SetItemAlphaEjj");
+    }
+    if (!GS_GamePlay_s_instance_ptr) {
+        GS_GamePlay_s_instance_ptr = (void **)so_symbol(&so_mod, "_ZN9SingletonI11GS_GamePlayE10s_instanceE");
+    }
+    if (!GUILevel_SetItemAlpha_func || !GS_GamePlay_s_instance_ptr) {
+        return false;
+    }
+    void *gs_instance = *GS_GamePlay_s_instance_ptr;
+    if (!gs_instance) {
+        return false;
+    }
+    void *guiLevel = get_gameplay_gui_level();
+    if (!guiLevel) {
+        return false;
+    }
+
+    uint32_t control_scheme = *(uint32_t *)((uintptr_t)gs_instance + 0x30);
+    uint32_t alpha = visible ? 255 : 0;
+
+    // Indices 0 through 10 cover the joystick (0, 1, 2), all action buttons (4, 5, 8, 10),
+    // and tutorial/hint icons (3, 6, 9). This ensures the aim button is successfully hidden
+    // regardless of the control_scheme.
+    for (uint32_t i = 0; i <= 10; i++) {
+        set_item_alpha_safe(guiLevel, i, alpha);
+    }
+
+    // ButtonEnum 7 (weapon selector, indices 0xb/11 and above) is deliberately omitted
+    // because the user explicitly requested to keep it visible!
+
+    return true;
+}
+
 void so_patch(void) {
+    s_isGUIVisible_ptr = (bool *)so_symbol(&so_mod, "_ZN8GUILevel14s_isGUIVisibleE");
     m_gAppPath_ptr = (char **)so_symbol(&so_mod, "m_gAppPath");
 
     uintptr_t initPath_sym = so_symbol(&so_mod, "_Z8initPathv");
