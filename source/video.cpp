@@ -127,7 +127,19 @@ static void av_free(void *arg, void *ptr) {
 static struct { void *base; SceUID uid; } gAvTexBlocks[AV_TEX_MAX_BLOCKS];
 
 /**
- * @brief Texture memory allocator targeting CDRAM with automatic fallback to PHYCONT.
+ * @brief Texture memory allocator with tiered fallback so the intro actually starts.
+ * @details Tier 1 is CDRAM with custom alignment (what SceAvPlayer/OpenFMV normally
+ *          use). Tier 2 is physically-contiguous main RAM, which the kernel always
+ *          aligns to 1MB itself and rejects a custom alignment opt for
+ *          (SCE_KERNEL_ERROR_INVALID_ARGUMENT) -- hence NULL opt. Tier 3 is
+ *          USER_RW_UNCACHE, the same fallback SDL's Vita GXM renderer uses when VRAM
+ *          runs out: uncached, GXM-mappable, and NOT drawn from the contiguous pools,
+ *          so it still succeeds when both CDRAM and PHYCONT report
+ *          NO_FREE_PHYSICAL_PAGE (0x80024309/0x80024302) -- the exact failure seen in
+ *          game_log_1789105223771.txt:881, where vitaGL (MSAA 4X) had already eaten
+ *          CDRAM before video_play() ran. Our playback path only memcpys the decoded
+ *          frame out and uploads it via glTexSubImage2D, so any CPU-writable mapping
+ *          works; the sceGxmMapMemory call keeps the pointer valid for AvPlayer.
  */
 static void *av_alloc_texture(void *arg, uint32_t alignment, uint32_t size) {
     (void) arg;
@@ -142,21 +154,35 @@ static void *av_alloc_texture(void *arg, uint32_t alignment, uint32_t size) {
     opt.attr = 0x00000004U; // SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_ALIGNMENT
     opt.alignment = alignment;
     SceUID blk = sceKernelAllocMemBlock("av_tex", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, size, &opt);
-    SceUID usedType = SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW;
+    const char *usedType = "CDRAM";
     if (blk < 0) {
+        SceUID cdram_err = blk;
         // PHYCONT blocks are always naturally aligned to 1MB by the kernel and
         // reject a custom alignment attribute with SCE_KERNEL_ERROR_INVALID_ARGUMENT
         // (0x80020005) -- pass no opt at all for this fallback allocation.
-        size = AV_ALIGN_MEM(size, 0x100000);
-        SceUID blk2 = sceKernelAllocMemBlock("av_tex_phycont", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW, size, NULL);
+        uint32_t phy_size = AV_ALIGN_MEM(size, 0x100000);
+        SceUID blk2 = sceKernelAllocMemBlock("av_tex_phycont", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW, phy_size, NULL);
         if (blk2 < 0) {
-            l_error("video: texture memblock alloc FAILED on both CDRAM (0x%08X) and PHYCONT (0x%08X) (req align=%u size=%u -> size=%u)",
-                    (unsigned) blk, (unsigned) blk2, req_align, req_size, size);
-            return NULL;
+            SceUID phy_err = blk2;
+            // Last resort: uncached RAM (SDL Vita GXM pattern). Accepts an alignment
+            // opt like CDRAM and is GXM-mappable, but comes from neither contiguous
+            // pool, so it survives both being exhausted.
+            SceUID blk3 = sceKernelAllocMemBlock("av_tex_uncache", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, size, &opt);
+            if (blk3 < 0) {
+                l_error("video: texture memblock alloc FAILED on CDRAM (0x%08X), PHYCONT (0x%08X) and UNCACHE (0x%08X) (req align=%u size=%u -> size=%u)",
+                        (unsigned) cdram_err, (unsigned) phy_err, (unsigned) blk3, req_align, req_size, size);
+                return NULL;
+            }
+            l_warn("video: CDRAM (0x%08X) and PHYCONT (0x%08X) exhausted -- fell back to UNCACHE for this frame buffer",
+                   (unsigned) cdram_err, (unsigned) phy_err);
+            blk = blk3;
+            usedType = "UNCACHE";
+        } else {
+            l_warn("video: CDRAM alloc failed (0x%08X) -- fell back to PHYCONT for this frame buffer", (unsigned) cdram_err);
+            blk = blk2;
+            usedType = "PHYCONT";
+            size = phy_size;
         }
-        l_warn("video: CDRAM alloc failed (0x%08X) -- fell back to PHYCONT for this frame buffer", (unsigned) blk);
-        blk = blk2;
-        usedType = SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW;
     }
     void *base = NULL;
     sceKernelGetMemBlockBase(blk, &base);
@@ -166,13 +192,16 @@ static void *av_alloc_texture(void *arg, uint32_t alignment, uint32_t size) {
     for (int i = 0; i < AV_TEX_MAX_BLOCKS; i++) {
         if (!gAvTexBlocks[i].base) { slot = i; break; }
     }
-    if (slot >= 0) {
-        gAvTexBlocks[slot].base = base;
-        gAvTexBlocks[slot].uid = blk;
+    if (slot < 0) {
+        l_error("video: no free texture block slots (max %d) -- releasing uid=0x%08X", AV_TEX_MAX_BLOCKS, (unsigned) blk);
+        sceGxmUnmapMemory(base);
+        sceKernelFreeMemBlock(blk);
+        return NULL;
     }
+    gAvTexBlocks[slot].base = base;
+    gAvTexBlocks[slot].uid = blk;
     l_info("video: texture memblock ok (%s) (req align=%u size=%u -> size=%u) base=%p uid=0x%08X gxm_map=0x%08X",
-           usedType == SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW ? "CDRAM" : "PHYCONT",
-           req_align, req_size, size, base, (unsigned) blk, (unsigned) map);
+           usedType, req_align, req_size, size, base, (unsigned) blk, (unsigned) map);
     return base;
 }
 

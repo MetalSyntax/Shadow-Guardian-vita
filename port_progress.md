@@ -1098,3 +1098,39 @@
    - Se amplió este límite a `250` píxeles para ambos ejes, incrementando teóricamente en un 150% la distancia del deslizamiento virtual, lo cual debería traducirse en un giro de cámara mucho más fluido y rápido.
 
 *Nota: Estos cambios han compilado correctamente en `eboot.bin`, pero **aún están a la espera de confirmación real en la consola** para validar que el mapeo, la cámara y el HUD reaccionan exactamente como se espera.*
+
+### Bug #22 (fix aplicado, sin confirmar en consola, 2026-09-11): el video intro (`logo.m4v`) sigue sin reproducir ni un frame — CDRAM y PHYCONT agotados a la vez
+
+- **Síntoma:** con el fix del Bug #17 ya desplegado, la intro sigue sin verse. `logs/game_log_1789105223771.txt:873-887`:
+  el archivo abre bien (`fd=0x40010239`, `file size -> 723304`), se leen 2 chunks de 65536 bytes y en la
+  línea 881 falla `av_alloc_texture()`:
+  `[error] video: texture memblock alloc FAILED on both CDRAM (0x80024309) and PHYCONT (0x80024302)
+  (req align=1048576 size=1048576 -> size=1048576)`. El loop termina con
+  `iterations=21, video_frames=0, audio_frames=0, elapsed=0.04s` — AvPlayer aborta sin decodificar nada.
+- **Causa raíz (confirmada por log real + headers de vitasdk, no por hipótesis):** el fix del Bug #17 SÍ
+  funcionó — el error PHYCONT cambió de `0x80020005` (INVALID_ARGUMENT, el bug de reutilizar el `opt` de
+  alineación) a `0x80024302` (`SCE_KERNEL_ERROR_NO_FREE_PHYSICAL_PAGE`, ver
+  `/Users/metalsyntax/vitasdk/arm-vita-eabi/include/psp2/kernel/error.h:58`; el `0x80024309` es su gemelo
+  de CDRAM en la línea 65). O sea: el fallback PHYCONT ahora se intenta correctamente, pero AMBOS pools
+  contiguos están agotados de verdad en ese punto del arranque — `gl_init()` corre antes que
+  `video_play()` (`source/main.c`) con `vglInitExtended(0, 960, 544, 6MB, SCE_GXM_MULTISAMPLE_4X)`, y el
+  MSAA 4X se come la CDRAM libre. Con los dos pools contiguos sin ni una página de 1MB, devolver NULL
+  hace que AvPlayer aborte el stream entero.
+- **Fix aplicado:** en `source/video.cpp`, `av_alloc_texture()` ahora tiene 3 niveles
+  (CDRAM → PHYCONT → `SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE`). El tercer nivel es el mismo patrón que
+  usa el renderer GXM de SDL en Vita cuando se queda sin VRAM: memoria no-cacheada, mapeable con
+  `sceGxmMapMemory`, que NO sale de ninguno de los dos pools contiguos, así que sobrevive a ambos
+  agotados. Nuestro pipeline solo hace `memcpy` del frame decodificado y lo sube con `glTexSubImage2D`,
+  así que cualquier memoria escribible por CPU sirve (OpenFMV, el reproductor AvPlayer de referencia de
+  Rinnegatamante, confirma que el allocator de textura solo necesita memoria válida mapeada). De paso se
+  corrigió un leak silencioso: si los 8 slots de `gAvTexBlocks` estaban llenos, el bloque recién asignado
+  se perdía (se retornaba `base` sin guardar el UID); ahora en ese caso se hace unmap+free y se retorna
+  NULL con log de error.
+- **Build:** `psvita-toolkit build` compila limpio, sin warnings nuevos en `video.cpp`.
+- [ ] Pendiente confirmar en consola física: desplegar y verificar en `game_log_*.txt` que aparece
+  `video: texture memblock ok (UNCACHE ...)` (o CDRAM/PHYCONT) para `logo.m4v`, que `video_frames > 0` al
+  salir del loop, y que la intro se ve y se escucha al abrir el juego. Si el log muestra `ok (UNCACHE)`
+  pero el primer frame sale con `Y-plane all_same=1, first_byte=0` (el diagnóstico de decoder que nunca
+  escribió ya existe en `video_play()`), el siguiente sospechoso es que el decodificador HW necesite RAM
+  físicamente contigua para DMA y haya que atacar la presión de CDRAM de vitaGL (p. ej. bajar MSAA 4X),
+  no el allocator.
