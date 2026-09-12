@@ -1151,3 +1151,24 @@
   3. En `source/reimpl/io.c`: soporte en `try_fallback_1_7` para subcarpetas `GloftSGHP/`.
 - **Build:** `psvita-toolkit build` compila limpio; VPK generado en `build/shadowguardian.vpk`.
 
+### Bug #24 (fix aplicado, sin confirmar en consola, 2026-09-11): mismo crash del Bug #23/Crash 2 (`SpriteMgr::LoadSprite`, PC `0x981b40fc`) reaparece en v1.2.1 pese al check de `init.c` — gap real en `translate_path()`
+
+- **Dumps/log analizados:** `game_log_1789159413437.txt` + `psp2core-1789159431-0x000c693413-eboot.bin.psp2dmp`, corridos ya con el hotfix v1.2.1 (commit `3c9d3fb`, 13:50 -04) instalado — el log es de las 16:43 -04, posterior al hotfix.
+- **`psvita-toolkit analyze` sobre el dump:** Data abort, `PC = 0x981b40fc` [`_Locale_long_d_fmt+0xc`, símbolo STLport real, no basura], `LR = 0x981b40e8` [`_Locale_d_fmt+0x10`] — mismo lugar exacto que el Crash 2 de Bug #23.
+- **Log, justo antes del crash:**
+  ```
+  stat(ux0:data/shadowguardian/sprites_1_6 -> ux0:data/shadowguardian/sprites_1_6): -1
+  Exp: 0 <= index && index < m_chunkCount, File: .../engine/Lib.cpp, Line: 162
+  Exp: 0 <= index && index < m_chunkCount, File: .../engine/Lib.cpp, Line: 162
+  ```
+  El check de arranque de `init.c` (agregado en el hotfix v1.2.1) **no disparó** ningún `fatal_error` — o sea, en el momento del boot sí encontró `sprites_1_6` en alguna de sus 3 ubicaciones válidas (`DATA_PATH`, `DATA_PATH "GloftSGHP/"`). Pero más tarde, el `stat()` real que hace el propio `.so` sobre el path plano falla con `-1`.
+- **Causa raíz (confirmada leyendo `translate_path()` en `source/reimpl/io.c`, no por hipótesis):**
+  - `patch.c` (hook de `initPath`) hace que el motor crea que su `m_gAppPath` completo ES `DATA_PATH` — por lo tanto **todas** las llamadas reales de `Lib::Open()`/asset loading en runtime llegan a `fopen_soloader`/`stat_soloader` ya como paths `ux0:` planos (`ux0:data/shadowguardian/sprites_1_6`), nunca como el path Android original (`/sdcard/gameloft/games/GloftSGHP/...`).
+  - La rama de `translate_path()` que atiende paths `ux0:`/`app0:`/etc. (líneas ~71-80) solo intentaba, si el archivo plano no existía, el fallback `try_fallback_1_7()` — que únicamente actúa si el nombre contiene el substring `_1_7`. Para `sprites_1_6` (no contiene `_1_7`) esa rama no hacía nada y devolvía el path sin resolver.
+  - Ningún otro branch de `translate_path()` revisa `DATA_PATH "GloftSGHP/<archivo>"` para un path que YA llega con prefijo `ux0:` — ese fallback solo existe en las ramas de paths estilo Android (`sdcard_prefix`, `"GloftSGHP/"` literal), que en la práctica nunca se ejercitan porque el hook de `initPath` los evita.
+  - Resultado: un tester que copia los assets manteniendo la estructura original del APK (`ux0:data/shadowguardian/GloftSGHP/sprites_1_6`, sin aplanar a `ux0:data/shadowguardian/sprites_1_6`) pasa el check de arranque (que sí contempla esa ubicación) pero falla en el `stat()`/`fopen()` real de carga de sprites — exactamente la asimetría vista en el log.
+  - Con `m_chunkCount` en 0 tras el `Lib::Open()` fallido, `Lib::GetSize()`/`GetData()`/`GetDataStream()` devuelven `0`/`NULL` de forma segura (confirmado en el pseudo-C de Ghidra, `out_ghidra.c:213253-213283`), pero `SpriteMgr::LoadSprite()` (llamado igual, sin chequear el resultado de `Lib::Open`) termina desreferenciando ese estado inválido más adelante, cayendo por casualidad en código STLport de locale (`_Locale_long_d_fmt`) — el mismo síntoma exacto del Crash 2 original de Bug #23.
+- **Fix aplicado:** en `source/reimpl/io.c`, rama `ux0:`/`app0:`/`ur0:`/`uma0:` de `translate_path()` — si el path plano bajo `DATA_PATH` no existe y `try_fallback_1_7` no aplica, ahora también intenta `DATA_PATH "GloftSGHP/" + resto_del_path` antes de rendirse. Esto generaliza a **cualquier** asset el fallback que antes solo cubría el caso `_1_7`→`_1_6`, y lo alinea con lo que `init.c` ya asumía válido en su chequeo de arranque.
+- **Build:** `psvita-toolkit build` compila limpio (`shadowguardian.vpk` regenerado).
+- [ ] Pendiente confirmar en consola física: redeployar y pedir un log nuevo. Si el fix es correcto, debería verse `stat(ux0:data/shadowguardian/sprites_1_6 -> ux0:data/shadowguardian/GloftSGHP/sprites_1_6): 0` (o el `fopen` equivalente) y ya no debería repetirse el assert `m_chunkCount` de `Lib.cpp:162` ni el crash en `_Locale_long_d_fmt`.
+

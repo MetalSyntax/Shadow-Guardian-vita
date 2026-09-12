@@ -1,9 +1,10 @@
-# Shadow Guardian Vita v1.2.1
+# Shadow Guardian Vita v1.2.2
 
 This is a wrapper/port of **Shadow Guardian HD** for the PS Vita.
 
 ## Changelog
 
+- v1.2.2: Fixed a crash in `SpriteMgr::LoadSprite` (Data abort inside STLport locale code, `_Locale_long_d_fmt`) that could still happen after v1.2.1 despite the startup asset check passing. Root cause: the engine's asset requests reach `translate_path()` (`source/reimpl/io.c`) already as flat `ux0:` paths (via the `initPath` hook), and that code path had no fallback to `DATA_PATH "GloftSGHP/<file>"` for anything other than the `_1_7`→`_1_6` redirect — so a data folder that kept the original APK layout (`GloftSGHP/sprites_1_6` instead of a flattened `sprites_1_6`) passed the startup check but still failed to load the sprite Lib at runtime, corrupting engine state and crashing shortly after. The `GloftSGHP/` fallback is now applied to every asset request, not just `_1_7`.
 - v1.2.1: Robustness hotfix — added validation guards in vitaGL's `unserialize_shader` and `glLinkProgram` to prevent crash on corrupted/0-byte shader cache files (falls back to recompilation cleanly); added early startup data validation in `init.c` with friendly error dialogues if required game assets (`sprites_1_6`/`sprites_1_7` or `res/`) are missing; improved asset fallback routing for `GloftSGHP/` subfolders.
 - v1.2: Intro video playback (`logo.m4v`) via SceAvPlayer on boot; virtual touch buttons hide/show with CIRCLE via `SetItemAlpha` (indices 0-10, weapon selector stays visible); D-Pad sends native menu keys; left stick only drives the virtual joystick in-game; faster free-look camera (drag radius 100→250) and wider stick deadzone (20→40); fixed crash on in-game Exit (`SoundMgr::Update` NULL deref — process now exits cleanly to LiveArea).
 - v1.1: Full physical-controls mapping verified on hardware (sticks, D-Pad, R/L, Cross/Circle/Square/Triangle with touch injection at the real on-screen button positions); direct 800x480 to 960x544 display scaling fix (no FBO, engine FBOs untouched); analog deadzone with rescaling to absorb stick drift.

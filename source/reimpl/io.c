@@ -76,6 +76,22 @@ static const char *translate_path(const char *path, char *buffer, size_t size) {
         const char *fb = try_fallback_1_7(path, buffer, size);
         if (fb) return fb;
 
+        // patch.c's initPath hook makes the engine believe its whole app
+        // path IS DATA_PATH, so every Lib::Open()/asset request the .so
+        // makes at runtime arrives here already as a flat "ux0:" path --
+        // it never goes through the sdcard_prefix/"GloftSGHP/" branches
+        // below. Testers who copy the data files keeping the original
+        // Android layout (DATA_PATH "GloftSGHP/<file>") pass init.c's
+        // startup check (which explicitly allows that layout) but then
+        // fail here silently, since this branch had no equivalent
+        // fallback. Mirror it for every asset, not just the _1_7 case.
+        if (strncmp(path, DATA_PATH, sizeof(DATA_PATH) - 1) == 0 &&
+            strncmp(path + sizeof(DATA_PATH) - 1, "GloftSGHP/", 10) != 0) {
+            snprintf(buffer, size, "%sGloftSGHP/%s", DATA_PATH,
+                     path + sizeof(DATA_PATH) - 1);
+            if (file_exists(buffer)) return buffer;
+        }
+
         return path;
     }
 
