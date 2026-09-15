@@ -386,22 +386,32 @@ so_default_dynlib default_dynlib[] = {
         { "stat", (uintptr_t)&stat_soloader },
         { "utime", (uintptr_t)&utime },
 
+        // fread/fseek/ftell/feof/ferror/ungetc/setvbuf/fgetpos/fsetpos/freopen
+        // are routed through our own soloader wrappers (not directly to
+        // SceLibcBridge/newlib) so the sounds/*.wav read cache in
+        // reimpl/io.c can transparently serve cached handles alongside real
+        // ones -- see fopen_soloader()'s cache fast path. libshadowguardian.so
+        // imports all of these (confirmed via objdump -T), so every one of
+        // them needs a safe path for a cached handle, not just fread/fclose.
+        { "feof", (uintptr_t)&feof_soloader },
+        { "ferror", (uintptr_t)&ferror_soloader },
+        { "fgetpos", (uintptr_t)&fgetpos_soloader },
+        { "fread", (uintptr_t)&fread_soloader },
+        { "freopen", (uintptr_t)&freopen_soloader },
+        { "fseek", (uintptr_t)&fseek_soloader },
+        { "fsetpos", (uintptr_t)&fsetpos_soloader },
+        { "ftell", (uintptr_t)&ftell_soloader },
+        { "setvbuf", (uintptr_t)&setvbuf_soloader },
+        { "ungetc", (uintptr_t)&ungetc_soloader },
+
         #ifdef USE_SCELIBC_IO
             { "fdopen", (uintptr_t)&sceLibcBridge_fdopen },
-            { "feof", (uintptr_t)&sceLibcBridge_feof },
-            { "ferror", (uintptr_t)&sceLibcBridge_ferror },
             { "fflush", (uintptr_t)&sceLibcBridge_fflush },
             { "fgetc", (uintptr_t)&sceLibcBridge_fgetc },
-            { "fgetpos", (uintptr_t)&sceLibcBridge_fgetpos },
             { "fgets", (uintptr_t)&sceLibcBridge_fgets },
             { "fileno", (uintptr_t)&sceLibcBridge_fileno },
             { "fputc", (uintptr_t)&sceLibcBridge_fputc },
             { "fputs", (uintptr_t)&sceLibcBridge_fputs },
-            { "fread", (uintptr_t)&sceLibcBridge_fread },
-            { "freopen", (uintptr_t)&sceLibcBridge_freopen },
-            { "fseek", (uintptr_t)&sceLibcBridge_fseek },
-            { "fsetpos", (uintptr_t)&sceLibcBridge_fsetpos },
-            { "ftell", (uintptr_t)&sceLibcBridge_ftell },
             { "fwide", (uintptr_t)&sceLibcBridge_fwide },
             { "fwrite", (uintptr_t)&sceLibcBridge_fwrite },
             { "getc", (uintptr_t)&sceLibcBridge_getc },
@@ -410,25 +420,15 @@ so_default_dynlib default_dynlib[] = {
             { "putchar", (uintptr_t)&sceLibcBridge_putchar },
             { "puts", (uintptr_t)&sceLibcBridge_puts },
             { "putwc", (uintptr_t)&sceLibcBridge_putwc },
-            { "setvbuf", (uintptr_t)&sceLibcBridge_setvbuf },
-            { "ungetc", (uintptr_t)&sceLibcBridge_ungetc },
             { "ungetwc", (uintptr_t)&sceLibcBridge_ungetwc },
         #else
             { "fdopen", (uintptr_t)&fdopen },
-            { "feof", (uintptr_t)&feof },
-            { "ferror", (uintptr_t)&ferror },
             { "fflush", (uintptr_t)&fflush },
             { "fgetc", (uintptr_t)&fgetc },
-            { "fgetpos", (uintptr_t)&fgetpos },
             { "fgets", (uintptr_t)&fgets },
             { "fileno", (uintptr_t)&fileno },
             { "fputc", (uintptr_t)&fputc },
             { "fputs", (uintptr_t)&fputs },
-            { "fread", (uintptr_t)&fread },
-            { "freopen", (uintptr_t)&freopen },
-            { "fseek", (uintptr_t)&fseek },
-            { "fsetpos", (uintptr_t)&fsetpos },
-            { "ftell", (uintptr_t)&ftell },
             { "fwide", (uintptr_t)&fwide },
             { "fwrite", (uintptr_t)&fwrite },
             { "getc", (uintptr_t)&getc },
@@ -437,8 +437,6 @@ so_default_dynlib default_dynlib[] = {
             { "putchar", (uintptr_t)&putchar },
             { "puts", (uintptr_t)&puts },
             { "putwc", (uintptr_t)&putwc },
-            { "setvbuf", (uintptr_t)&setvbuf },
-            { "ungetc", (uintptr_t)&ungetc },
             { "ungetwc", (uintptr_t)&ungetwc },
         #endif
 

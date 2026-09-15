@@ -676,12 +676,21 @@ static inline __attribute__((always_inline)) void compile_shader(shader *s, GLbo
 #endif
 	shark_clear_output();
 #ifdef HAVE_SHADER_CACHE
-	SceUID f = sceIoOpen(cache_fname, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777);
-	size_t sz;
-	void *buf = serialize_shader(NULL, &sz, s, save_bindings);
-	sceIoWrite(f, buf, sz);
-	sceIoClose(f);
-	vgl_free(buf);
+	// Bug #26 (2026-09-14): shark_compile_shader_extended can fail (leaves
+	// s->prog NULL) without resetting s->size, so caching unconditionally
+	// here passed a NULL source pointer and a stale/garbage length into
+	// sceClibMemcpy via serialize_shader -> Data abort. Only cache a shader
+	// that actually compiled.
+	if (s->prog) {
+		SceUID f = sceIoOpen(cache_fname, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777);
+		if (f >= 0) {
+			size_t sz;
+			void *buf = serialize_shader(NULL, &sz, s, save_bindings);
+			sceIoWrite(f, buf, sz);
+			sceIoClose(f);
+			vgl_free(buf);
+		}
+	}
 #endif
 }
 

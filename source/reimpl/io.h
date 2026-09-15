@@ -125,6 +125,26 @@ int close_soloader(int fd);
 
 int fclose_soloader(FILE *f);
 
+size_t fread_soloader(void *ptr, size_t size, size_t count, FILE *stream);
+
+int fseek_soloader(FILE *stream, long offset, int origin);
+
+long ftell_soloader(FILE *stream);
+
+int feof_soloader(FILE *stream);
+
+int ferror_soloader(FILE *stream);
+
+int ungetc_soloader(int c, FILE *stream);
+
+int setvbuf_soloader(FILE *stream, char *buf, int mode, size_t size);
+
+int fgetpos_soloader(FILE *stream, fpos_t *pos);
+
+int fsetpos_soloader(FILE *stream, const fpos_t *pos);
+
+FILE * freopen_soloader(const char *filename, const char *mode, FILE *stream);
+
 int closedir_soloader(DIR *dir);
 
 int fcntl_soloader(int fd, int cmd, ...);

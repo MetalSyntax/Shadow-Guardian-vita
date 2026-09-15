@@ -69,9 +69,29 @@ void soloader_init_all() {
 
     if (!file_exists(DATA_PATH "sprites_1_7") &&
         !file_exists(DATA_PATH "sprites_1_6") &&
-        !file_exists(DATA_PATH "GloftSGHP/sprites_1_6")) {
+        !file_exists(DATA_PATH "GloftSGHP/sprites_1_6") &&
+        !file_exists(DATA_PATH "GloftSGHP/sprites_1_7")) {
         fatal_error("Missing game data files in %s.\n\n"
                     "Please make sure you copied all game asset files (including 'sprites_1_6' or 'sprites_1_7') "
+                    "directly into %s.", DATA_PATH, DATA_PATH);
+    }
+
+    // Bug #25 (2026-09-12): a tester's console crashed deep in gameplay
+    // (SpriteMgr::LoadSprite, same PC/LR as Bug #23/#24) after the log showed
+    // BOTH "gui_1_6" and "sprites_1_6" failing stat() (flat and GloftSGHP/
+    // fallback), even though the sprites_1_7/sprites_1_6 check above passed.
+    // gui_1_6 is a separate, independently-required Lib chunk file that the
+    // check above never validated -- a data copy missing only gui_1_6 (or
+    // only sprites_1_6, with a stale/partial sprites_1_7 satisfying the check
+    // above) still passed startup and crashed later with an opaque native
+    // STLport locale abort instead of a clear message. Validate it the same
+    // way sprites_1_6/1_7 already are.
+    if (!file_exists(DATA_PATH "gui_1_7") &&
+        !file_exists(DATA_PATH "gui_1_6") &&
+        !file_exists(DATA_PATH "GloftSGHP/gui_1_6") &&
+        !file_exists(DATA_PATH "GloftSGHP/gui_1_7")) {
+        fatal_error("Missing game data files in %s.\n\n"
+                    "Please make sure you copied all game asset files (including 'gui_1_6' or 'gui_1_7') "
                     "directly into %s.", DATA_PATH, DATA_PATH);
     }
 
