@@ -1,0 +1,94 @@
+<technique name="interactive_basic" version="100">
+	<pass name="pass0" target="GLES2.0">
+    <uniforms>
+      <var name="inWorldViewProjMatrix" val="matrix.worldviewproj"/>
+	  <var name="inTime" val="driver.time"/>
+
+	  <var name="OutlineSize" type="float" val="0" min="0" max="1"/>
+    </uniforms>
+    <attributes>
+      <var name="inPos" val="mesh.positions"/>
+      <var name="inNormal" val="mesh.normals"/>
+    </attributes>
+
+	<renderstate>
+		<culling val="true" face="front"/>
+	</renderstate>
+	
+	<rendertarget val="default"/>
+	
+    <shader>
+      <vshader>
+        <![CDATA[
+				uniform highp mat4 inWorldViewProjMatrix;
+				uniform highp float inTime;
+				uniform highp float OutlineSize;
+				attribute vec3 inPos;
+				attribute vec3 inNormal;
+				
+				void main()
+				{
+					highp float w = (inWorldViewProjMatrix * vec4(inPos, 1.0)).w;
+					highp float t = abs(sin(inTime*3.0) * OutlineSize)*w;
+					gl_Position = inWorldViewProjMatrix * vec4(inPos+inNormal*t, 1.0);
+				}
+			   ]]>
+      </vshader>
+      <fshader>
+        <![CDATA[
+				void main()
+				{
+					gl_FragColor = vec4(1.0);
+				}
+			   ]]>
+      </fshader>
+    </shader>
+  </pass>
+
+	<pass name="pass1" target="GLES2.0">
+    <uniforms>
+      <var name="inWorldViewProjMatrix" val="matrix.worldviewproj"/>
+    </uniforms>
+    <attributes>
+      <var name="inPos" val="mesh.positions"/>
+      <var name="inUV0" val="mesh.uv0"/>
+    </attributes>
+	<samplers>
+		<var name="texture0"/>
+	</samplers>
+
+	<rendertarget val="default"/>
+	
+    <shader>
+      <vshader>
+        <![CDATA[
+				uniform highp mat4 inWorldViewProjMatrix;
+
+				attribute vec3 inPos;
+				attribute vec2 inUV0;
+				
+				varying highp vec2 uv;
+				
+				void main()
+				{
+					gl_Position = inWorldViewProjMatrix * vec4(inPos, 1.0);
+					uv = inUV0;
+				}
+			   ]]>
+      </vshader>
+      <fshader>
+        <![CDATA[
+				varying highp vec2 uv;
+				uniform sampler2D texture0;
+				
+				void main()
+				{
+					lowp vec4 texColor0 = texture2D(texture0, uv);
+					gl_FragColor = texColor0;
+				}
+			   ]]>
+      </fshader>
+    </shader>
+  </pass>
+    
+</technique>

@@ -205,6 +205,9 @@ vita_create_vpk(${VITA_VPKNAME}.vpk ${VITA_TITLEID} eboot.bin
                 ${CMAKE_SOURCE_DIR}/extras/livearea/startup.png sce_sys/livearea/contents/startup.png
                 ${CMAKE_SOURCE_DIR}/extras/livearea/bg0.png sce_sys/livearea/contents/bg0.png
                 ${CMAKE_SOURCE_DIR}/extras/livearea/template.xml sce_sys/livearea/contents/template.xml
+                ${CMAKE_SOURCE_DIR}/extras/shader_patches/interactible_basic.xml shader_patches/interactible_basic.xml
+                ${CMAKE_SOURCE_DIR}/extras/shader_patches/interactible_bump.xml shader_patches/interactible_bump.xml
+                ${CMAKE_SOURCE_DIR}/extras/shader_patches/interactible_shadowmap.xml shader_patches/interactible_shadowmap.xml
                 )
 
 add_custom_target(send

@@ -1,0 +1,96 @@
+<technique name="interactive_bump" version="100">
+	<pass name="pass0" target="GLES2.0">
+    <uniforms>
+      <var name="inWorldViewProjMatrix" val="matrix.worldviewproj"/>
+	  <var name="inTime" val="driver.time"/>
+
+	  <var name="OutlineSize" type="float" val="0" min="0" max="1"/>
+    </uniforms>
+    <attributes>
+      <var name="inPos" val="mesh.positions"/>
+      <var name="inNormal" val="mesh.normals"/>
+    </attributes>
+
+	<renderstate>
+		<culling val="true" face="front"/>
+	</renderstate>
+	
+	<rendertarget val="default"/>
+	
+    <shader>
+      <vshader>
+        <![CDATA[
+				uniform highp mat4 inWorldViewProjMatrix;
+				uniform highp float inTime;
+				uniform highp float OutlineSize;
+				attribute vec3 inPos;
+				attribute vec3 inNormal;
+				
+				void main()
+				{
+					highp float w = (inWorldViewProjMatrix * vec4(inPos, 1.0)).w;
+					highp float t = abs(sin(inTime*3.0) * OutlineSize)*w;
+					gl_Position = inWorldViewProjMatrix * vec4(inPos+inNormal*t, 1.0);
+				}
+			   ]]>
+      </vshader>
+      <fshader>
+        <![CDATA[
+				uniform highp float OutlineSize;
+				void main()
+				{
+					if (OutlineSize<0.002)
+							discard;
+					gl_FragColor = vec4(1.0);
+				}
+			   ]]>
+      </fshader>
+    </shader>
+  </pass>
+
+  <pass name="pass1" target="GLES2.0">
+    <uniforms>
+      <var name="inWorldViewProjMatrix" val="matrix.worldviewproj"/>
+      <var name="inCameraPos" val="camera.positionOS"/>
+
+	  <var name="inPLightPos" val="plight.positionOS"/>
+	  
+	  	<var name="ColorScale" type="float" val="1"/>
+		<var name="AlphaScale" type="float" val="1"/>
+	  <var name="AmbientIntensity" type="float" val="0" min="0" max="1"/>
+	  <var name="Shininess" type="float" val="0.6" min="0.01" max="1"/>
+	  <var name="SpecularIntensity" type="float" val="1" min="0.2" max="1"/>
+	  <var name="BumpIntensity" type="float" val="1" min="0.2" max="1"/>
+    </uniforms>
+    <attributes>
+      <var name="inPos" val="mesh.positions"/>
+      <var name="inNormal" val="mesh.normals"/>
+      <var name="inTangent" val="mesh.tangents"/>
+      <var name="inUV0" val="mesh.uv0"/>
+    </attributes>
+	<samplers>
+		<var name="diffuseMap"/>
+		<var name="normalMap"/>
+	</samplers>
+
+	<rendertarget val="default"/>
+	
+    <shader>
+      <vshader>
+        <![CDATA[
+		#define USE_SPEC
+		
+		#include "df_nm_sm_spec_fres_refl.vs"
+			   ]]>
+      </vshader>
+      <fshader>
+        <![CDATA[
+		#define USE_SPEC
+		
+		#include "df_nm_sm_spec_fres_refl.fs"
+			   ]]>
+      </fshader>
+    </shader>
+  </pass>
+    
+</technique>
