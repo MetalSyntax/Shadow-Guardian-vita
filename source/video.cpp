@@ -449,7 +449,13 @@ uint64_t gVideoSwapUsTotal = 0;
 uint64_t gVideoUploadYUsTotal = 0;
 uint64_t gVideoUploadUVUsTotal = 0;
 
-#define VIDEO_DOWNSAMPLE_UPLOAD 1
+// Was 1: halved the decoded frame (480x272 -> 240x136) before uploading, then the
+// aspect-correct 2x viewport scale stretched that low-res texture 4x back up to
+// 960x544 with GL_LINEAR -- a very visible blur on hardware ("mejora la nitidez y
+// escalado del video intro"). The intro plays once for a few seconds, so the extra
+// upload bandwidth from uploading it at full decoded resolution is an easy trade for
+// a sharp, correctly-scaled video.
+#define VIDEO_DOWNSAMPLE_UPLOAD 0
 
 #if VIDEO_DOWNSAMPLE_UPLOAD
 static unsigned char *gVideoDsY = NULL;

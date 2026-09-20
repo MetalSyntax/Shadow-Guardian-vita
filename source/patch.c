@@ -327,7 +327,6 @@ bool set_virtual_buttons_visible(bool visible) {
         return false;
     }
 
-    uint32_t control_scheme = *(uint32_t *)((uintptr_t)gs_instance + 0x30);
     uint32_t alpha = visible ? 255 : 0;
 
     // Indices 0 through 10 cover the joystick (0, 1, 2), all action buttons (4, 5, 8, 10),
@@ -337,10 +336,32 @@ bool set_virtual_buttons_visible(bool visible) {
         set_item_alpha_safe(guiLevel, i, alpha);
     }
 
-    // ButtonEnum 7 (weapon selector, indices 0xb/11 and above) is deliberately omitted
-    // because the user explicitly requested to keep it visible!
+    // ButtonEnum 7 (weapon selector) is now hidden too: R/L already cover fire/aim, and
+    // TRIANGLE/CROSS (physical) already cover weapon-switch/grab, so the on-screen weapon
+    // icon is redundant. Indices 0xb..0x20 (11-32) are the exact set GS_GamePlay::SetButtonVisible
+    // itself fades out for case 7 when hiding (decompiled/libshadowguardian_armeabi-v7a/ghidra/
+    // out_ghidra.c:160029-160049) -- reusing the engine's own confirmed index list instead of
+    // guessing avoids leaving stray weapon-slot graphics visible.
+    for (uint32_t i = 0xb; i <= 0x20; i++) {
+        set_item_alpha_safe(guiLevel, i, alpha);
+    }
 
     return true;
+}
+
+// GS_GamePlay::HighlightButton(ButtonEnum, int) (out_ghidra.c:158911) does nothing but
+// `*(int *)(this + (param_1 + 0xe) * 4) = param_2;` -- it just writes a per-button glow/pulse
+// timer field on the GS_GamePlay instance, read by a SEPARATE draw path than the GUILevel item
+// alpha `set_virtual_buttons_visible` forces to 0 above. The engine calls this on its own
+// (contextual aim feedback, "touch this button" QTE/tutorial hints, etc.), so it kept lighting
+// up a blue glow over buttons we had already hidden -- exactly the "efecto azul sobre un boton
+// invisible" and the aim button "reapareciendo" reported on hardware. Since we know the whole
+// function body, we just reimplement it and force the write to 0 (no highlight) whenever the
+// virtual buttons are supposed to be hidden, instead of relying on a trampoline to call through.
+extern bool g_hide_virtual_buttons;
+static void GS_GamePlay_HighlightButton_hook(void *gs_gameplay, uint32_t button_enum, int32_t value) {
+    *(int32_t *)((uint8_t *)gs_gameplay + (button_enum + 0xe) * 4) =
+            g_hide_virtual_buttons ? 0 : value;
 }
 
 void so_patch(void) {
@@ -353,6 +374,14 @@ void so_patch(void) {
         l_info("Hooked _Z8initPathv successfully");
     } else {
         l_warn("Could not find _Z8initPathv to hook");
+    }
+
+    uintptr_t highlight_button_sym = so_symbol(&so_mod, "_ZN11GS_GamePlay15HighlightButtonENS_10ButtonEnumEi");
+    if (highlight_button_sym) {
+        hook_addr(highlight_button_sym, (uintptr_t)&GS_GamePlay_HighlightButton_hook);
+        l_info("Hooked GS_GamePlay::HighlightButton successfully");
+    } else {
+        l_warn("Could not find GS_GamePlay::HighlightButton to hook");
     }
 
     uintptr_t license_init_sym = so_symbol(&so_mod, "ALicenseCheck_InitLicense");

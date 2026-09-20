@@ -40,15 +40,15 @@ In order to properly install the game, you'll need to extract the data from the 
 ## Controls
 
 - **Left Analog** - Movement (in-game only)
-- **Right Analog** - Camera (free-look)
+- **Right Analog** - Camera (free-look, continuous drag - hold to keep turning; light tilt for slow/precise aim, full tilt for a fast full 360°)
 - **D-Pad** - Menu Navigation / Movement
 - **R** - Fire
-- **L / Square** - Aim (hold)
-- **Cross** - Contextual action (jump / run / grab / climb)
-- **Triangle** - Reload / Switch weapon
-- **Circle** - Toggle Virtual Buttons (Hide/Show HUD layout)
+- **L** - Aim (hold)
+- **Cross** - Contextual action (jump / run / climb)
+- **Circle** - Grab / interact
+- **Square** - Switch weapon
 - **Start** - Pause / Back
-- **Select** - Menu
+- **Select** - Toggle Virtual Buttons (Hide/Show touch controls)
 - **Touch Screen** - Original Touch Controls
 
 ## Build Instructions (For Developers)

@@ -117,29 +117,54 @@ static void resolve_entrypoints(void) {
 //   -- tune them if you moved the buttons.
 // - Synthetic touches use fingerIds 50..65, outside the real front-touch id
 //   range, so they never collide with real finger tracking below.
-// Button positions measured on real 960x544 gameplay screenshot
-// (screenshots/dc/2026-09-06/2026-09-06-033741.jpg, exploration scene),
-// converted to engine space (x*800/960, y*480/544):
-//   R                 -> FIRE (gun icon, bottom-center-right)
-//   L / SQUARE        -> AIM (small crosshair, bottom-right corner, hold)
-//   CROSS             -> JUMP/climb (runner icon, mid-right)
-//   CIRCLE            -> HAND/interact top-right slot (contextual: hand,
-//                        cover, etc. depending on scene)
-//   TRIANGLE          -> RELOAD/weapon (GUESS: left of FIRE; only visible
-//                        in combat -- verify on hardware, harmless if empty)
+// Button positions RE-MEASURED with a pixel grid overlay on the real 960x544
+// gameplay screenshot (screenshots/dc/2026-09-06/2026-09-06-033741.jpg,
+// exploration scene) after hardware testing showed the previous guesses were
+// wrong (TRIANGLE, bound to the old F_WPN spot, was firing the gun instead of
+// switching weapons -- that spot was ~100px from the real weapon icon and
+// inside the FIRE button's touch hit-radius). Converted to engine space
+// (x*800/960, y*480/544):
+//   R        -> FIRE (gun icon, bottom-right corner)          real (750,511)
+//   L        -> AIM (small crosshair/reticle, bottom-right)   real (905,503)
+//   CROSS    -> ACT: running-man icon (jump/run/climb)        real (870,374)
+//   CIRCLE   -> GRAB: hand icon (interact/pick up objects)    real (870,172)
+//   SQUARE   -> weapon switch (see below, NOT a plain tap on the icon)
+//   SELECT   -> toggle showing the touch controls (debug/accessibility,
+//               used to be CIRCLE before CIRCLE became GRAB)
 //   Left stick / Dpad -> virtual joystick (down + drag around its center)
-//   Right stick       -> free-look camera (drag on right half)
+//   Right stick       -> free-look camera (continuous drag, see below)
+//
+// Weapon switch is NOT a simple tap-to-toggle button like the others: per
+// out_ghidra.c:86760-86813 (the PlayerCtrl input handler), the weapon-icon
+// touch region is read via TouchManager::FindTouch and then the code branches
+// on the DRAG DELTA of that touch (`curX - startX`) -- if the drag is bigger
+// than ~30 units, its SIGN alone picks Actor::SetNextWeapon() (dragged right)
+// or Actor::SetPreviousWeapon() (dragged left); only a near-zero-delta TAP
+// falls back to fixed X thresholds (365/450) whose coordinate space we could
+// not confirm from static analysis alone (they don't line up with the icon's
+// own on-screen position, so they're likely in some internal/reference space,
+// not the 800x480 GameGLSurfaceView space every other button here uses).
+// Rather than guess those thresholds and risk another wrong-button bug like
+// the original TRIANGLE guess, SQUARE synthesizes a DOWN-then-MOVE-right-then-
+// UP swipe starting at the confirmed weapon icon spot: the swipe distance
+// (F_WPN_SWIPE_DX) only needs to clear the ~30-unit drag threshold, which it
+// does by a wide margin regardless of which coordinate space that threshold
+// turns out to be in, and the sign-based logic doesn't depend on the disputed
+// 365/450 constants at all.
 // ---------------------------------------------------------------------------
-#define F_FIRE_X   621
-#define F_FIRE_Y   422
-#define F_AIM_X    738
-#define F_AIM_Y    432
-#define F_ACT_X    738
-#define F_ACT_Y    304
-#define F_COVER_X  738
-#define F_COVER_Y  176
-#define F_WPN_X    542
-#define F_WPN_Y    424
+#define F_FIRE_X   625
+#define F_FIRE_Y   451
+#define F_AIM_X    754
+#define F_AIM_Y    444
+#define F_ACT_X    725
+#define F_ACT_Y    330
+#define F_GRAB_X   725
+#define F_GRAB_Y   152
+#define F_WPN_X    688
+#define F_WPN_Y    30
+// How far right the synthetic swipe travels from F_WPN_X. Clamped so
+// F_WPN_X + F_WPN_SWIPE_DX stays inside the 800-wide engine viewport.
+#define F_WPN_SWIPE_DX 100
 
 #define F_JOY_CX   129
 #define F_JOY_CY   406
@@ -150,13 +175,29 @@ static void resolve_entrypoints(void) {
 
 #define F_CAM_X    583
 #define F_CAM_Y    240
+// The free-look drag used to map stick tilt directly to a touch offset capped
+// at +-250px from the anchor: full deflection jumped straight to the cap and
+// then just sat there (fast turn, but hard-capped -- no way to keep spinning
+// for a full 360, and no way to go slower than "instant jump" either, since
+// there was no notion of speed, only position). F_CAM_SPEED is now a
+// per-frame pixel VELOCITY (scaled by tilt via dz_rescale, so light tilt is
+// slow/precise and full tilt is fast) and F_CAM_RADIUS is just how far the
+// virtual drag travels before we release-and-recenter the touch (invisible to
+// the player, keeps the drag going indefinitely in the same direction instead
+// of stopping at an edge) -- see the wraparound logic where the camera block
+// uses these.
+#define F_CAM_SPEED  10
+// Kept comfortably inside the 800x480 engine viewport around F_CAM_X/Y (583,240)
+// on every side (right margin is the tightest: 800-583=217) so the wrap-recenter
+// touch coordinates below never need a separate screen-edge clamp.
+#define F_CAM_RADIUS 200
 
 #define FID_JOY   50
 #define FID_CAM   51
 #define FID_FIRE  60
 #define FID_AIM   61
 #define FID_ACT   62
-#define FID_COVER 63
+#define FID_GRAB  63
 #define FID_WPN   64
 
 // Deadzone with rescaling: values within dz snap to 0, the rest is
@@ -286,20 +327,20 @@ int main(void) {
 
     int joy_active = 0, joy_x = F_JOY_CX, joy_y = F_JOY_CY;
     int cam_active = 0, cam_x = F_CAM_X, cam_y = F_CAM_Y;
-    int fire_on = 0, aim_on = 0, act_on = 0, cover_on = 0, wpn_on = 0;
+    int fire_on = 0, aim_on = 0, act_on = 0, grab_on = 0;
 
     l_info("Entering main render loop...");
-    bool virtual_buttons_state_synced = false;
     while (1) {
         sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DEFAULT);
 
-        // GS_GamePlay (and its GUILevel) only exists once a level is loaded, so the initial
-        // g_hide_virtual_buttons default can't be applied at startup -- keep retrying once per
-        // frame (cheap: two NULL checks once resolved) until gameplay actually begins.
-        if (!virtual_buttons_state_synced) {
-            extern bool set_virtual_buttons_visible(bool visible);
-            virtual_buttons_state_synced = set_virtual_buttons_visible(!g_hide_virtual_buttons);
-        }
+        // GS_GamePlay (and its GUILevel) only exists once a level is loaded, so this is a
+        // no-op (returns false) until gameplay actually begins. Called every frame (not just
+        // once) because the engine itself re-shows some of these items on its own during
+        // normal gameplay (e.g. contextual aim feedback) -- a one-shot apply at startup got
+        // silently overridden later and left the aim button stuck visible on hardware, so we
+        // now keep stomping the alpha back to hidden every frame instead of latching.
+        extern bool set_virtual_buttons_visible(bool visible);
+        set_virtual_buttons_visible(!g_hide_virtual_buttons);
 
         // Physical controls -> native keys + synthetic touches.
         if (sceCtrlPeekBufferPositive(0, &pad, 1) > 0) {
@@ -308,15 +349,7 @@ int main(void) {
             uint32_t pressed = current_buttons & ~old_buttons;
             uint32_t released = ~current_buttons & old_buttons;
 
-            if (pressed & SCE_CTRL_CIRCLE) {
-                g_hide_virtual_buttons = !g_hide_virtual_buttons;
-                extern bool set_virtual_buttons_visible(bool visible);
-                set_virtual_buttons_visible(!g_hide_virtual_buttons);
-            }
-
             // START -> KEYCODE_BACK (4): pause / back in menus.
-            // NOTE: CIRCLE no longer sends BACK (old behaviour); it is the
-            // COVER/crouch touch button below, like Uncharted on Vita.
             if (pressed & SCE_CTRL_START) {
                 nativeOnKeyDown(&jni, NULL, 4);
             }
@@ -324,29 +357,27 @@ int main(void) {
                 nativeOnKeyUp(&jni, NULL, 4);
             }
 
-            // SELECT -> KEYCODE_MENU (82)
+            // SELECT -> toggle showing the touch controls (debug/accessibility).
+            // Used to be CIRCLE before CIRCLE became the GRAB button.
             if (pressed & SCE_CTRL_SELECT) {
-                nativeOnKeyDown(&jni, NULL, 82);
-            }
-            if (released & SCE_CTRL_SELECT) {
-                nativeOnKeyUp(&jni, NULL, 82);
+                g_hide_virtual_buttons = !g_hide_virtual_buttons;
             }
 
             // Fire: R trigger (hold). Synthetic DOWN once, UP on release.
             synth_button(pressed, released, SCE_CTRL_RTRIGGER,
                          &fire_on, FID_FIRE, F_FIRE_X, F_FIRE_Y);
-            // Aim: L trigger (hold). Shares the spot with SQUARE below.
-            if ((pressed & (SCE_CTRL_LTRIGGER | SCE_CTRL_SQUARE)) && !aim_on) {
-                aim_on = 1;
-                synth_touch(1, F_AIM_X, F_AIM_Y, FID_AIM);
-            }
-            if (!(current_buttons & (SCE_CTRL_LTRIGGER | SCE_CTRL_SQUARE)) && aim_on) {
-                aim_on = 0;
-                synth_touch(0, F_AIM_X, F_AIM_Y, FID_AIM);
-            }
-            // ACT contextual (jump/run/grab/climb): CROSS (hold/tap).
+            // Aim: L trigger only (hold). No longer shared with SQUARE -- the user
+            // confirmed on hardware that SQUARE aiming too was unwanted/confusing.
+            synth_button(pressed, released, SCE_CTRL_LTRIGGER,
+                         &aim_on, FID_AIM, F_AIM_X, F_AIM_Y);
+            // ACT contextual (jump/run/climb, runner icon): CROSS (hold/tap).
             synth_button(pressed, released, SCE_CTRL_CROSS,
                          &act_on, FID_ACT, F_ACT_X, F_ACT_Y);
+            // Grab/interact (hand icon): CIRCLE (hold/tap). Replaces the old debug
+            // toggle that made the touch controls visible again -- not wanted anymore
+            // now that every action has a physical button.
+            synth_button(pressed, released, SCE_CTRL_CIRCLE,
+                         &grab_on, FID_GRAB, F_GRAB_X, F_GRAB_Y);
             // D-Pad -> Native DPAD Keys for Menu Navigation
             if (pressed & SCE_CTRL_UP) nativeOnKeyDown(&jni, NULL, 19);
             if (released & SCE_CTRL_UP) nativeOnKeyUp(&jni, NULL, 19);
@@ -360,9 +391,15 @@ int main(void) {
             if (pressed & SCE_CTRL_RIGHT) nativeOnKeyDown(&jni, NULL, 22);
             if (released & SCE_CTRL_RIGHT) nativeOnKeyUp(&jni, NULL, 22);
 
-            // Weapon switch: TRIANGLE (tap).
-            synth_button(pressed, released, SCE_CTRL_TRIANGLE,
-                         &wpn_on, FID_WPN, F_WPN_X, F_WPN_Y);
+            // Weapon switch: SQUARE (tap = synthetic swipe-right over the weapon
+            // icon; see the big comment above F_FIRE_X for why a swipe and not a
+            // plain tap). No hold state needed -- the whole down/move/up sequence
+            // fires once per press.
+            if (pressed & SCE_CTRL_SQUARE) {
+                synth_touch(1, F_WPN_X, F_WPN_Y, FID_WPN);
+                synth_touch(2, F_WPN_X + F_WPN_SWIPE_DX, F_WPN_Y, FID_WPN);
+                synth_touch(0, F_WPN_X + F_WPN_SWIPE_DX, F_WPN_Y, FID_WPN);
+            }
             // Left stick -> virtual joystick (finger FID_JOY).
             // Only generate touch events if we are in-game (GUI is visible),
             // otherwise stick drift can click things in the main menu.
@@ -399,21 +436,39 @@ int main(void) {
                 synth_touch(0, joy_x, joy_y, FID_JOY);
             }
 
-            // Right stick -> free-look camera drag (finger FID_CAM).
-            // Anchor in the middle of the right half; deflect to drag.
-            // Increased dz_rescale radius from 100 to 250 to fix limited camera movement speed.
+            // Right stick -> free-look camera as a CONTINUOUS relative drag (finger
+            // FID_CAM), not an absolute stick-tilt-to-position mapping. Tilt sets a
+            // per-frame velocity (slow tilt = slow/precise turn, full tilt = fast
+            // turn), and cam_x/cam_y accumulate every frame the stick is held, so
+            // holding the stick keeps rotating instead of stopping once the touch
+            // hits its cap. When the accumulated drag would leave the +-F_CAM_RADIUS
+            // box around the anchor, we release the touch at the edge and press
+            // again at the anchor in the same frame -- invisible to the player, but
+            // lets the drag continue indefinitely in the same direction, which is
+            // what makes a full slow 360 around the character possible.
             int rx = (int)pad.rx - 128;
             int ry = (int)pad.ry - 128;
-            int cox = dz_rescale(rx, 250);
-            int coy = dz_rescale(ry, 250);
-            if (cox != 0 || coy != 0) {
-                cam_x = F_CAM_X + cox;
-                cam_y = F_CAM_Y + coy;
-                if (cam_x < 0) cam_x = 0;
-                if (cam_x >= SCREEN_W) cam_x = SCREEN_W - 1;
-                if (cam_y < 0) cam_y = 0;
-                if (cam_y >= SCREEN_H) cam_y = SCREEN_H - 1;
-                if (!cam_active) {
+            int vx = dz_rescale(rx, F_CAM_SPEED);
+            int vy = dz_rescale(ry, F_CAM_SPEED);
+            if (vx != 0 || vy != 0) {
+                cam_x += vx;
+                cam_y += vy;
+                int dx = cam_x - F_CAM_X;
+                int dy = cam_y - F_CAM_Y;
+                bool out_of_range = dx < -F_CAM_RADIUS || dx > F_CAM_RADIUS ||
+                                     dy < -F_CAM_RADIUS || dy > F_CAM_RADIUS;
+                if (out_of_range) {
+                    if (dx < -F_CAM_RADIUS) dx = -F_CAM_RADIUS;
+                    if (dx >  F_CAM_RADIUS) dx =  F_CAM_RADIUS;
+                    if (dy < -F_CAM_RADIUS) dy = -F_CAM_RADIUS;
+                    if (dy >  F_CAM_RADIUS) dy =  F_CAM_RADIUS;
+                    synth_touch(cam_active ? 2 : 1, F_CAM_X + dx, F_CAM_Y + dy, FID_CAM);
+                    synth_touch(0, F_CAM_X + dx, F_CAM_Y + dy, FID_CAM);
+                    cam_x = F_CAM_X;
+                    cam_y = F_CAM_Y;
+                    synth_touch(1, cam_x, cam_y, FID_CAM);
+                    cam_active = 1;
+                } else if (!cam_active) {
                     cam_active = 1;
                     synth_touch(1, cam_x, cam_y, FID_CAM);
                 } else {
