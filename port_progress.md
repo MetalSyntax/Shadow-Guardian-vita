@@ -1273,3 +1273,37 @@
 - **Build:** `psvita-toolkit build` compila limpio, VPK regenerado (`build/shadowguardian.vpk`).
 - [ ] Pendiente confirmar en consola física (mandar log nuevo): (a) CUADRADO cambia de arma (probar varias veces, cicla entre las armas que el log muestra cargadas: pistola, rifle, sniper, uzi, ametralladora); (b) SELECT muestra/oculta los controles táctiles; (c) el stick derecho permite girar la cámara 360° completos sosteniendo la inclinación, y a inclinación suave el giro es notablemente más lento/preciso que antes; (d) si el efecto azul de cambio de arma sigue apareciendo, mandar un log/captura de pantalla del instante exacto en que aparece.
 
+### Mejora #32 (aplicada, 2026-09-26): cámara ultra fluida estilo N.O.V.A 2, arma siempre visible en HUD y botón de mira oculto
+
+- **Pedidos del usuario:**
+  1. Mejorar el movimiento de la cámara del stick derecho adoptando el sistema de N.O.V.A 2 para que sea mucho más fluido.
+  2. Hacer visible siempre el arma virtual arriba a la derecha (como el botón de pausa).
+  3. Ocultar el botón de mira que se encontraba visible en la esquina inferior derecha.
+- **Causa raíz 1 (cámara con saltos discretos y sin ajuste de sensibilidad):** el sistema anterior de cámara usaba enteros truncados (`dz_rescale`), lo que generaba saltos abruptos o frenado a bajas velocidades. Se portó de `N.O.V.A-2-vita`:
+  - Curva de respuesta cuadrática con deadzone normalizada (`look_curve`: `0.35f * t + 0.65f * t * t`, deadzone `0.15f`).
+  - Acumulador de precisión float (`look_fx`, `look_fy`) que acumula fracciones de píxel evitando micro-stuttering.
+  - Velocidades independientes horizontal (`14.0f`) y vertical (`9.0f`).
+  - Recentrado invisible (wrap) en caja delimitadora de `±110px` alrededor de `(583, 240)`.
+  - Sensibilidad configurable en caliente de 1 a 10 con `SELECT + D-pad Arriba/Abajo`, guardada en `ux0:data/shadowguardian/camera_sens.txt`.
+  - OSD de barra de 10 bloques rendered con `glScissor` y `glClear` sin alterar el pipeline gráfico.
+- **Causa raíz 2 (arma virtual oculta y botón de mira visible):**
+  - En la Mejora #31 se había agregado un bucle `for (i = 0xb; i <= 0x20; i++)` que forzaba el selector de arma a alpha 0. Al mismo tiempo, el bucle de ocultamiento solo llegaba hasta el índice 32 (`0x20`), dejando intactos los índices `0x21` a `elementsCount - 1`. En el esquema 0 (por defecto), los índices `0x23` y `0x24` son el botón de mira (AIM), por lo que nunca se ocultaban.
+  - Se actualizó `set_virtual_buttons_visible`: recorre todos los elementos hasta `elementsCount`. Los índices `0xb..0x20` (arma virtual) se mantienen siempre en alpha 255 y visibles, mientras que los índices `0..10` y `0x21..elementsCount-1` (incluyendo `0x23` y `0x24`, botón de mira) se ocultan con alpha 0 y `SetItemVisible(..., false)`.
+- **Build:** `cmake --build build` compila limpio, VPK regenerado (`build/shadowguardian.vpk`).
+- **Ajuste tras prueba en consola (`game_log_1790482539193.txt`):** el usuario reportó que la cámara, sensibilidad y el botón de mira oculto quedaron perfectos, pero que forzar `SetItemVisible(true)` en todos los índices `0xb..0x20` del selector de arma hacía que el motor mostrara todos los sprites de armas superpuestos y la retícula de mira aun sin apuntar. Se corrigió de inmediato en `source/patch.c`: se removió el forzado de visibilidad en `0xb..0x20`, dejando únicamente la opacidad al 100% (`alpha = 255`) para que sea la propia lógica interna del motor (`UpdateWeaponGUI`) la que decida cuál arma y retícula deben mostrarse de acuerdo al estado de juego. VPK regenerado y listo.
+
+### Mejora #33 (confirmada en hardware, 2026-09-27): eliminación definitiva de micro-pausas en giros 360°
+
+- **Reporte del usuario:** "Cuando giro la camara hay micro pausas la idea es que sea mas fluido sin esas pausas cuando hago giros 360 y la sensibilidad funciona haciendo que las micro pausas sean como mas rapidas".
+- **Causa raíz diagnosticada en Ghidra (`PlayerCtrl::UpdateFreeCameraTouch` y `StartFreeCamera`):**
+  - Cada vez que el cursor virtual salía del marco de 110 px (`F_CAM_BOX = 110`), se forzaba un ciclo de `ACTION_UP` (soltar) seguido de `ACTION_DOWN` (presionar de nuevo en el centro) para reiniciar coordenadas.
+  - Al recibir `ACTION_DOWN`, el motor ejecuta `PlayerCtrl::StartFreeCamera`, la cual resetea la inercia/aceleración de la cámara al mínimo (`*(float *)(this + 100) = 0.25f`) y deja el delta del siguiente frame en 0.
+  - A velocidad máxima, cada 110 px se cruzaban cada 8 a 18 frames (~3 a 7 veces por segundo), frenando la rotación en seco periódicamente. A mayor sensibilidad, la distancia se cubría más rápido, haciendo que los tirones/pausas ocurrieran con mayor frecuencia.
+- **Solución implementada:**
+  - Se confirmó en `TouchManager::OnTouchDrag` (`out_ghidra.c:147128`) que los eventos `ACTION_MOVE` no tienen restricción de límites de pantalla ni colisionan con botones una vez que el toque fue registrado en la zona libre (`FID_CAM`).
+  - Se eliminó la caja artificial de 110 px en `source/main.c`. Ahora el arrastre (`ACTION_MOVE`) es **100% continuo e ininterrumpido** mientras el stick derecho se mantenga inclinado, manteniendo la inercia máxima y una rotación fluida a 60 fps sin pausas.
+  - El toque solo se suelta (`ACTION_UP`) cuando el stick derecho vuelve a la zona muerta (o mediante un failsafe de 50.000 px para evitar overflow numérico en sesiones prolongadas).
+- **Build:** `cmake --build build` compila limpio (`build/shadowguardian.vpk`). Confirmado por el usuario en hardware: "funciona perfecto".
+
+
+

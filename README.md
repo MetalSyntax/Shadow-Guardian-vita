@@ -66,15 +66,16 @@ The game **is fully playable from start to finish at a smooth 60 FPS**. See
 | Vita input | Action |
 |---|---|
 | Left Analog | Movement (in-game) |
-| Right Analog | Camera (free-look, continuous drag — light tilt for slow/precise aim, full tilt for fast 360°) |
+| Right Analog | Camera (free-look, continuous drag — smooth quadratic response & sub-pixel precision) |
+| Select + D-Pad Up / Down | Adjust camera sensitivity (1–10, saved to `camera_sens.txt` with OSD bar) |
 | D-Pad | Menu navigation / movement |
-| R | Fire |
-| L | Aim (hold) |
+| R / R1 | Fire |
+| L / L1 | Aim (hold) |
 | Cross | Contextual action (jump / run / climb) |
 | Circle | Grab / interact |
 | Square | Switch weapon |
 | Start | Pause / back |
-| Select | Toggle virtual buttons (hide/show touch controls) |
+| Select (tap) | Toggle virtual buttons (hide/show touch controls) |
 | Touch screen | Original touch controls |
 
 ### ⚠️ Known Issues

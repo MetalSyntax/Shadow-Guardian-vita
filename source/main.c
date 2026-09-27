@@ -6,6 +6,8 @@
 
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/clib.h>
+#include <psp2/io/fcntl.h>
 #include <psp2/ctrl.h>
 #include "video.h"
 #include <psp2/touch.h>
@@ -173,24 +175,21 @@ static void resolve_entrypoints(void) {
 // hurting response; output is rescaled so full deflection = full radius.
 #define F_JOY_DZ   40
 
-#define F_CAM_X    583
-#define F_CAM_Y    240
-// The free-look drag used to map stick tilt directly to a touch offset capped
-// at +-250px from the anchor: full deflection jumped straight to the cap and
-// then just sat there (fast turn, but hard-capped -- no way to keep spinning
-// for a full 360, and no way to go slower than "instant jump" either, since
-// there was no notion of speed, only position). F_CAM_SPEED is now a
-// per-frame pixel VELOCITY (scaled by tilt via dz_rescale, so light tilt is
-// slow/precise and full tilt is fast) and F_CAM_RADIUS is just how far the
-// virtual drag travels before we release-and-recenter the touch (invisible to
-// the player, keeps the drag going indefinitely in the same direction instead
-// of stopping at an edge) -- see the wraparound logic where the camera block
-// uses these.
-#define F_CAM_SPEED  10
-// Kept comfortably inside the 800x480 engine viewport around F_CAM_X/Y (583,240)
-// on every side (right margin is the tightest: 800-583=217) so the wrap-recenter
-// touch coordinates below never need a separate screen-edge clamp.
-#define F_CAM_RADIUS 200
+#define F_CAM_X       583
+#define F_CAM_Y       240
+#define F_CAM_WRAP_LIMIT 50000
+#define LOOK_DZ       0.15f
+// Velocidad maxima (nivel 10). Sensibilidad regulable en juego:
+// SELECT + D-pad arriba/abajo, niveles 1..10 (default 4 = 40%),
+// guardada en DATA_PATH"camera_sens.txt" con OSD de barra.
+#define LOOK_SPEED_X  14.0f
+#define LOOK_SPEED_Y  9.0f
+#define CAM_LEVEL_DEFAULT 4
+#define CAM_LEVEL_MAX 10
+#define CAM_CFG       DATA_PATH "camera_sens.txt"
+
+#define BTN_FIRE (SCE_CTRL_RTRIGGER | SCE_CTRL_R1)
+#define BTN_AIM  (SCE_CTRL_LTRIGGER | SCE_CTRL_L1)
 
 #define FID_JOY   50
 #define FID_CAM   51
@@ -200,9 +199,8 @@ static void resolve_entrypoints(void) {
 #define FID_GRAB  63
 #define FID_WPN   64
 
-// Deadzone with rescaling: values within dz snap to 0, the rest is
-// stretched so max deflection still gives full radius (no range loss,
-// no jump at the threshold like a plain cutoff).
+// Deadzone with rescaling for move joystick: values within dz snap to 0,
+// the rest is stretched so max deflection still gives full radius.
 static inline int dz_rescale(int v, int radius) {
     int a = v < 0 ? -v : v;
     if (a <= F_JOY_DZ) return 0;
@@ -224,10 +222,157 @@ static inline void synth_button(uint32_t pressed, uint32_t released, uint32_t ma
         synth_touch(1, x, y, fid);
     }
     if ((released & mask) && *active) {
-        // Only release when NONE of the sharing buttons is still held;
-        // the caller passes `released` filtered for that (see loop).
         *active = 0;
         synth_touch(0, x, y, fid);
+    }
+}
+
+// Camara fluida:
+// - Arrastre continuo por velocidad: el touch se mantiene activo mientras el
+//   stick este inclinado. No se suelta repetidamente para evitar micro-pausas
+//   por reseteo de inercia del motor (StartFreeCamera).
+// - Curva con deadzone + respuesta cuadratica para apuntar fino con poca inclinacion.
+// - Acumulador float: inclinaciones leves avanzan <1px/frame sin perderse ni dar saltos.
+// - Sensibilidad persistente en camera_sens.txt con barra OSD.
+static float look_fx = F_CAM_X, look_fy = F_CAM_Y;
+static int cam_active = 0;
+static int cam_x = F_CAM_X;
+static int cam_y = F_CAM_Y;
+static int cam_level = CAM_LEVEL_DEFAULT;
+static uint64_t cam_osd_until = 0;
+
+static void cam_load(void) {
+    SceUID fd = sceIoOpen(CAM_CFG, SCE_O_RDONLY, 0);
+    if (fd < 0)
+        return;
+    char b[8] = { 0 };
+    sceIoRead(fd, b, sizeof(b) - 1);
+    sceIoClose(fd);
+    int v = atoi(b);
+    if (v >= 1 && v <= CAM_LEVEL_MAX)
+        cam_level = v;
+}
+
+static void cam_save(void) {
+    SceUID fd = sceIoOpen(CAM_CFG, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+    if (fd < 0)
+        return;
+    char b[8];
+    int n = sceClibSnprintf(b, sizeof(b), "%d\n", cam_level);
+    sceIoWrite(fd, b, n);
+    sceIoClose(fd);
+}
+
+static void cam_adjust(int d) {
+    int v = cam_level + d;
+    if (v < 1) v = 1;
+    if (v > CAM_LEVEL_MAX) v = CAM_LEVEL_MAX;
+    cam_level = v;
+    cam_save();
+    cam_osd_until = sceKernelGetProcessTimeWide() + 1500000;
+    l_info("[cam] sensibilidad %d/%d", cam_level, CAM_LEVEL_MAX);
+}
+
+// Barra de sensibilidad con glScissor+glClear (sin shaders).
+// Guarda y restaura el estado GL previo.
+static void cam_osd_draw(void) {
+    if (!cam_osd_until || sceKernelGetProcessTimeWide() > cam_osd_until)
+        return;
+    GLint fbo, box[4];
+    GLfloat cc[4];
+    GLboolean sc = glIsEnabled(GL_SCISSOR_TEST);
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fbo);
+    glGetIntegerv(GL_SCISSOR_BOX, box);
+    glGetFloatv(GL_COLOR_CLEAR_VALUE, cc);
+    if (fbo)
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glEnable(GL_SCISSOR_TEST);
+    const int bw = 22, bh = 14, gap = 4;
+    int x0 = (960 - (CAM_LEVEL_MAX * (bw + gap) - gap)) / 2;
+    int y0 = 544 - 20 - bh;   // GL: origen abajo -> 20 px desde arriba
+    glScissor(x0 - 4, y0 - 4, CAM_LEVEL_MAX * (bw + gap) - gap + 8, bh + 8);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    for (int i = 0; i < CAM_LEVEL_MAX; i++) {
+        glScissor(x0 + i * (bw + gap), y0, bw, bh);
+        if (i < cam_level)
+            glClearColor(0.2f, 0.8f, 1.0f, 1.0f);
+        else
+            glClearColor(0.25f, 0.25f, 0.25f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+    glScissor(box[0], box[1], box[2], box[3]);
+    glClearColor(cc[0], cc[1], cc[2], cc[3]);
+    if (!sc)
+        glDisable(GL_SCISSOR_TEST);
+    if (fbo)
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+}
+
+static float look_curve(float v) {
+    float a = v < 0 ? -v : v;
+    if (a <= LOOK_DZ)
+        return 0.0f;
+    float t = (a - LOOK_DZ) / (1.0f - LOOK_DZ);
+    if (t > 1.0f)
+        t = 1.0f;
+    t = 0.35f * t + 0.65f * t * t;
+    return v < 0 ? -t : t;
+}
+
+static void syn_look(float dx, float dy, bool in_game) {
+    if (!in_game) {
+        if (cam_active) {
+            cam_active = 0;
+            synth_touch(0, cam_x, cam_y, FID_CAM);
+            cam_x = F_CAM_X;
+            cam_y = F_CAM_Y;
+            look_fx = F_CAM_X;
+            look_fy = F_CAM_Y;
+        }
+        return;
+    }
+    float k = (float)cam_level / (float)CAM_LEVEL_MAX;
+    float vx = look_curve(dx) * LOOK_SPEED_X * k;
+    float vy = look_curve(dy) * LOOK_SPEED_Y * k;
+    if (vx == 0.0f && vy == 0.0f) {
+        if (cam_active) {
+            synth_touch(0, cam_x, cam_y, FID_CAM);
+            cam_active = 0;
+            cam_x = F_CAM_X;
+            cam_y = F_CAM_Y;
+            look_fx = F_CAM_X;
+            look_fy = F_CAM_Y;
+        }
+        return;
+    }
+    if (!cam_active) {
+        cam_active = 1;
+        look_fx = F_CAM_X;
+        look_fy = F_CAM_Y;
+        cam_x = F_CAM_X;
+        cam_y = F_CAM_Y;
+        synth_touch(1, F_CAM_X, F_CAM_Y, FID_CAM);
+    }
+    look_fx += vx;
+    look_fy += vy;
+    int nx = (int)look_fx, ny = (int)look_fy;
+    if (nx != cam_x || ny != cam_y) {
+        cam_x = nx;
+        cam_y = ny;
+        synth_touch(2, nx, ny, FID_CAM);
+    }
+    // Failsafe amplio para evitar overflow en caso improbable de mantener
+    // el stick inclinado por minutos seguidos sin soltar. En uso normal
+    // (giros 360), el touch permanece activo de forma continua y fluida.
+    if (nx < F_CAM_X - F_CAM_WRAP_LIMIT || nx > F_CAM_X + F_CAM_WRAP_LIMIT ||
+        ny < F_CAM_Y - F_CAM_WRAP_LIMIT || ny > F_CAM_Y + F_CAM_WRAP_LIMIT) {
+        synth_touch(0, nx, ny, FID_CAM);
+        look_fx = F_CAM_X;
+        look_fy = F_CAM_Y;
+        cam_x = F_CAM_X;
+        cam_y = F_CAM_Y;
+        synth_touch(1, F_CAM_X, F_CAM_Y, FID_CAM);
     }
 }
 
@@ -326,8 +471,10 @@ int main(void) {
     uint32_t current_buttons = 0;
 
     int joy_active = 0, joy_x = F_JOY_CX, joy_y = F_JOY_CY;
-    int cam_active = 0, cam_x = F_CAM_X, cam_y = F_CAM_Y;
     int fire_on = 0, aim_on = 0, act_on = 0, grab_on = 0;
+
+    cam_load();
+    l_info("BOOT: camera sensitivity %d/%d (SELECT + D-pad arriba/abajo)", cam_level, CAM_LEVEL_MAX);
 
     l_info("Entering main render loop...");
     while (1) {
@@ -357,25 +504,42 @@ int main(void) {
                 nativeOnKeyUp(&jni, NULL, 4);
             }
 
-            // SELECT -> toggle showing the touch controls (debug/accessibility).
-            // Used to be CIRCLE before CIRCLE became the GRAB button.
+            // SELECT + D-Pad UP/DOWN: sensibilidad de camara (1..10, persistente).
+            // SELECT solo: alterna visibilidad de controles virtuales al soltar.
+            static int select_combo_used = 0;
             if (pressed & SCE_CTRL_SELECT) {
-                g_hide_virtual_buttons = !g_hide_virtual_buttons;
+                select_combo_used = 0;
+            }
+            if (current_buttons & SCE_CTRL_SELECT) {
+                if (pressed & SCE_CTRL_UP) {
+                    cam_adjust(+1);
+                    select_combo_used = 1;
+                    pressed &= ~SCE_CTRL_UP;
+                } else if (pressed & SCE_CTRL_DOWN) {
+                    cam_adjust(-1);
+                    select_combo_used = 1;
+                    pressed &= ~SCE_CTRL_DOWN;
+                }
+            }
+            if (released & SCE_CTRL_SELECT) {
+                if (!select_combo_used) {
+                    g_hide_virtual_buttons = !g_hide_virtual_buttons;
+                }
+            }
+            if (select_combo_used) {
+                released &= ~(SCE_CTRL_UP | SCE_CTRL_DOWN);
             }
 
-            // Fire: R trigger (hold). Synthetic DOWN once, UP on release.
-            synth_button(pressed, released, SCE_CTRL_RTRIGGER,
+            // Fire: R trigger / R1 (hold). Synthetic DOWN once, UP on release.
+            synth_button(pressed, released, BTN_FIRE,
                          &fire_on, FID_FIRE, F_FIRE_X, F_FIRE_Y);
-            // Aim: L trigger only (hold). No longer shared with SQUARE -- the user
-            // confirmed on hardware that SQUARE aiming too was unwanted/confusing.
-            synth_button(pressed, released, SCE_CTRL_LTRIGGER,
+            // Aim: L trigger / L1 only (hold).
+            synth_button(pressed, released, BTN_AIM,
                          &aim_on, FID_AIM, F_AIM_X, F_AIM_Y);
             // ACT contextual (jump/run/climb, runner icon): CROSS (hold/tap).
             synth_button(pressed, released, SCE_CTRL_CROSS,
                          &act_on, FID_ACT, F_ACT_X, F_ACT_Y);
-            // Grab/interact (hand icon): CIRCLE (hold/tap). Replaces the old debug
-            // toggle that made the touch controls visible again -- not wanted anymore
-            // now that every action has a physical button.
+            // Grab/interact (hand icon): CIRCLE (hold/tap).
             synth_button(pressed, released, SCE_CTRL_CIRCLE,
                          &grab_on, FID_GRAB, F_GRAB_X, F_GRAB_Y);
             // D-Pad -> Native DPAD Keys for Menu Navigation
@@ -436,50 +600,11 @@ int main(void) {
                 synth_touch(0, joy_x, joy_y, FID_JOY);
             }
 
-            // Right stick -> free-look camera as a CONTINUOUS relative drag (finger
-            // FID_CAM), not an absolute stick-tilt-to-position mapping. Tilt sets a
-            // per-frame velocity (slow tilt = slow/precise turn, full tilt = fast
-            // turn), and cam_x/cam_y accumulate every frame the stick is held, so
-            // holding the stick keeps rotating instead of stopping once the touch
-            // hits its cap. When the accumulated drag would leave the +-F_CAM_RADIUS
-            // box around the anchor, we release the touch at the edge and press
-            // again at the anchor in the same frame -- invisible to the player, but
-            // lets the drag continue indefinitely in the same direction, which is
-            // what makes a full slow 360 around the character possible.
-            int rx = (int)pad.rx - 128;
-            int ry = (int)pad.ry - 128;
-            int vx = dz_rescale(rx, F_CAM_SPEED);
-            int vy = dz_rescale(ry, F_CAM_SPEED);
-            if (vx != 0 || vy != 0) {
-                cam_x += vx;
-                cam_y += vy;
-                int dx = cam_x - F_CAM_X;
-                int dy = cam_y - F_CAM_Y;
-                bool out_of_range = dx < -F_CAM_RADIUS || dx > F_CAM_RADIUS ||
-                                     dy < -F_CAM_RADIUS || dy > F_CAM_RADIUS;
-                if (out_of_range) {
-                    if (dx < -F_CAM_RADIUS) dx = -F_CAM_RADIUS;
-                    if (dx >  F_CAM_RADIUS) dx =  F_CAM_RADIUS;
-                    if (dy < -F_CAM_RADIUS) dy = -F_CAM_RADIUS;
-                    if (dy >  F_CAM_RADIUS) dy =  F_CAM_RADIUS;
-                    synth_touch(cam_active ? 2 : 1, F_CAM_X + dx, F_CAM_Y + dy, FID_CAM);
-                    synth_touch(0, F_CAM_X + dx, F_CAM_Y + dy, FID_CAM);
-                    cam_x = F_CAM_X;
-                    cam_y = F_CAM_Y;
-                    synth_touch(1, cam_x, cam_y, FID_CAM);
-                    cam_active = 1;
-                } else if (!cam_active) {
-                    cam_active = 1;
-                    synth_touch(1, cam_x, cam_y, FID_CAM);
-                } else {
-                    synth_touch(2, cam_x, cam_y, FID_CAM);
-                }
-            } else if (cam_active) {
-                cam_active = 0;
-                synth_touch(0, cam_x, cam_y, FID_CAM);
-                cam_x = F_CAM_X;
-                cam_y = F_CAM_Y;
-            }
+            // Right stick -> free-look camera (NOVA 2 style fluid continuous drag).
+            // Curva cuadratica, acumulador float y wrap instantaneo.
+            float ldx = ((float)pad.rx - 128.0f) / 128.0f;
+            float ldy = ((float)pad.ry - 128.0f) / 128.0f;
+            syn_look(ldx, ldy, in_game);
         }
 
         // Multi-touch tracking
@@ -525,6 +650,7 @@ int main(void) {
 
         // Render tick
         nativeGameRendererRender();
+        cam_osd_draw();
         gl_swap();
     }
 

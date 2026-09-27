@@ -302,12 +302,23 @@ static inline void set_item_alpha_safe(void *guiLevel, uint32_t idx, uint32_t al
     }
 }
 
-// Hide/show ONLY the on-screen graphics of the virtual joystick + action buttons by forcing opacity (alpha).
-// SetItemVisible left a blue shadow for the joystick base; setting alpha to 0 hides it completely.
-// Returns true if the engine actually applied the change (GUIMgr/GS_GamePlay singletons were
-// alive, i.e. we're in gameplay); false if there is currently no gameplay session (main menu,
-// loading screen) to apply it to -- callers that need the state applied as soon as gameplay
-// starts should keep retrying once per frame until this returns true.
+static inline void set_item_visible_safe(void *guiLevel, uint32_t idx, bool visible) {
+    if (!GUILevel_SetItemVisible_func) {
+        GUILevel_SetItemVisible_func = (void *)so_symbol(&so_mod, "_ZN8GUILevel14SetItemVisibleEjb");
+    }
+    if (!GUILevel_SetItemVisible_func) {
+        return;
+    }
+    uint32_t elementsCount = *(uint32_t *)((uintptr_t)guiLevel + 0xc);
+    if (idx < elementsCount) {
+        GUILevel_SetItemVisible_func(guiLevel, idx, visible);
+    }
+}
+
+// Hide/show on-screen graphics of virtual controls by forcing opacity (alpha) and visibility.
+// Weapon selector (indices 0xb..0x20, top-right) is kept ALWAYS VISIBLE (like the pause button).
+// All other items: joystick (0..2), scheme 1 buttons (3..10), and scheme 0 action buttons
+// (0x21..elementsCount-1, which include the bottom-right aim button at 0x23/0x24) are hidden.
 bool set_virtual_buttons_visible(bool visible) {
     if (!GUILevel_SetItemAlpha_func) {
         GUILevel_SetItemAlpha_func = (void *)so_symbol(&so_mod, "_ZN8GUILevel12SetItemAlphaEjj");
@@ -327,23 +338,24 @@ bool set_virtual_buttons_visible(bool visible) {
         return false;
     }
 
+    uint32_t elementsCount = *(uint32_t *)((uintptr_t)guiLevel + 0xc);
     uint32_t alpha = visible ? 255 : 0;
 
-    // Indices 0 through 10 cover the joystick (0, 1, 2), all action buttons (4, 5, 8, 10),
-    // and tutorial/hint icons (3, 6, 9). This ensures the aim button is successfully hidden
-    // regardless of the control_scheme.
-    for (uint32_t i = 0; i <= 10; i++) {
-        set_item_alpha_safe(guiLevel, i, alpha);
-    }
-
-    // ButtonEnum 7 (weapon selector) is now hidden too: R/L already cover fire/aim, and
-    // TRIANGLE/CROSS (physical) already cover weapon-switch/grab, so the on-screen weapon
-    // icon is redundant. Indices 0xb..0x20 (11-32) are the exact set GS_GamePlay::SetButtonVisible
-    // itself fades out for case 7 when hiding (decompiled/libshadowguardian_armeabi-v7a/ghidra/
-    // out_ghidra.c:160029-160049) -- reusing the engine's own confirmed index list instead of
-    // guessing avoids leaving stray weapon-slot graphics visible.
-    for (uint32_t i = 0xb; i <= 0x20; i++) {
-        set_item_alpha_safe(guiLevel, i, alpha);
+    for (uint32_t i = 0; i < elementsCount; i++) {
+        // Indices 0xb through 0x20 (11..32) are the weapon selector HUD graphics (top-right).
+        // Opacity is kept at 100% (255), but visibility is NEVER forced so the engine
+        // controls which weapon sprite is active without drawing all weapons or reticles at once.
+        if (i >= 0xb && i <= 0x20) {
+            set_item_alpha_safe(guiLevel, i, 255);
+        } else {
+            // All other items: joystick (0..2), action buttons (3..10), and
+            // scheme 0 action buttons (0x21..elementsCount-1, which include the
+            // bottom-right aim button at 0x23/0x24 and cover at 0x27/0x28).
+            set_item_alpha_safe(guiLevel, i, alpha);
+            if (!visible) {
+                set_item_visible_safe(guiLevel, i, false);
+            }
+        }
     }
 
     return true;

@@ -1,9 +1,14 @@
-# Shadow Guardian Vita v1.3
+# Shadow Guardian Vita v1.4
 
 This is a wrapper/port of **Shadow Guardian HD** for the PS Vita.
 
 ## Changelog
 
+- v1.4: Ultra-fluid camera overhaul, in-game sensitivity OSD, and HUD polish:
+  - **Eliminated camera micro-pauses during 360° turns.** The previous camera implementation relied on an artificial 110px bounding box that triggered synthetic `ACTION_UP` and `ACTION_DOWN` cycles. Decompilation revealed that `StartFreeCamera` reset camera inertia (`0.25f`) and produced 0-delta frames on every wrap, creating noticeable stutters during rotations. Drag is now 100% continuous while the stick is deflected, resulting in completely uninterrupted 60 FPS camera rotation.
+  - **In-game camera sensitivity adjustment (1–10) with OSD bar.** Sensitivity can now be adjusted in real time during gameplay using **SELECT + D-Pad Up / Down**. The setting is saved persistently to `ux0:data/shadowguardian/camera_sens.txt` and displays a clean 10-block on-screen indicator bar.
+  - **HUD virtual weapon selector & aim button polish.** The virtual weapon icon (top-right) is kept at 100% opacity without forcing visibility on every sub-element, allowing the engine's internal `UpdateWeaponGUI` to cleanly display only the currently active weapon without graphical overlap. The redundant touch aim button (bottom-right) and virtual joystick are cleanly hidden.
+  - **Select button dual-mode.** Tapping SELECT toggles virtual on-screen touch controls on release, without conflicting with SELECT + D-Pad sensitivity combos.
 - v1.3: Full controls rework based on hardware testing feedback:
   - **Wrong weapon-switch position fixed.** The old touch coordinate for the weapon icon was only measured by eye and turned out to sit inside the FIRE button's touch hit-radius, so pressing that button fired the gun instead of switching weapons. All button positions (fire, aim, contextual action, grab, weapon) were re-measured with a pixel grid over a real 960x544 gameplay screenshot.
   - **Weapon switch moved to Square and reworked as a swipe, not a tap.** Reading the engine's own input handler (`out_ghidra.c:86760-86813`) showed the real weapon selector responds to the *drag delta* of a touch (`Actor::SetNextWeapon()` / `SetPreviousWeapon()` picked by the sign of the movement, matching its actual "left/right arrow slider" look), not a fixed tap zone — so Square now sends a synthetic down → drag-right → release over the weapon icon instead of a plain tap.
@@ -40,21 +45,21 @@ In order to properly install the game, you'll need to extract the data from the 
 ## Controls
 
 - **Left Analog** - Movement (in-game only)
-- **Right Analog** - Camera (free-look, continuous drag - hold to keep turning; light tilt for slow/precise aim, full tilt for a fast full 360°)
+- **Right Analog** - Camera (free-look, continuous drag — smooth quadratic curve, sub-pixel precision, no stutter)
+- **Select + D-Pad Up / Down** - Adjust camera sensitivity (1–10, saved to `camera_sens.txt` with OSD bar)
 - **D-Pad** - Menu Navigation / Movement
-- **R** - Fire
-- **L** - Aim (hold)
+- **R / R1** - Fire
+- **L / L1** - Aim (hold)
 - **Cross** - Contextual action (jump / run / climb)
 - **Circle** - Grab / interact
-- **Square** - Switch weapon
+- **Square** - Switch weapon (synthetic swipe)
 - **Start** - Pause / Back
-- **Select** - Toggle Virtual Buttons (Hide/Show touch controls)
+- **Select (tap)** - Toggle Virtual Buttons (Hide/Show touch controls)
 - **Touch Screen** - Original Touch Controls
 
 ## Known Issues
 
-- A blue highlight/glow effect shown specifically when switching weapons may still appear even with the touch controls hidden — the generic `HighlightButton` hook (v1.3) covers the button-prompt glow, but the weapon-change flash may come from a separate, not-yet-located effect. Please report it with a log/screenshot of the exact moment it happens.
-- Square's weapon-switch swipe and the new continuous camera drag (v1.3) are newly implemented and pending confirmation on hardware across multiple weapons/play sessions.
+- A blue highlight/glow effect shown specifically when switching weapons may still appear even with the touch controls hidden — the generic `HighlightButton` hook covers the button-prompt glow, but the weapon-change flash may come from a separate effect. Please report it with a log/screenshot of the exact moment it happens.
 
 ## Troubleshooting
 
