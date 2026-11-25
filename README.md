@@ -1,19 +1,29 @@
-# SHADOW GUARDIAN — PS Vita Port
-
-<p align="center">
-  <img src="extras/livearea/pic0.png" width="700" alt="Shadow Guardian PS Vita Banner" />
-</p>
+<h1 align="center">
+  <img src="extras/livearea/pic0.png" alt="Shadow Guardian PS Vita Banner" width="700"><br>
+  Shadow Guardian · PS Vita Port
+</h1>
 
 <p align="center">
   <b>Native port of Shadow Guardian HD (Gameloft) for PlayStation Vita and PlayStation TV.</b>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Platform-PS%20Vita%20%7C%20PS%20TV-003791.svg?style=flat-square&logo=playstation" alt="Platform PS Vita" />
-  <img src="https://img.shields.io/badge/Title%20ID-PSVSGHD01-ff69b4.svg?style=flat-square" alt="Title ID PSVSGHD01" />
+  <img src="https://img.shields.io/badge/Platform-PS%20Vita%20%7C%20PS%20TV-003791.svg?style=flat-square&logo=playstation" alt="Platform" />
+  <img src="https://img.shields.io/badge/Origin-Android-3DDC84.svg?style=flat-square&logo=android" alt="Origin" />
+  <img src="https://img.shields.io/badge/Title%20ID-PSVSGHD01-ff69b4.svg?style=flat-square" alt="Title ID" />
   <img src="https://img.shields.io/badge/Engine-Gameloft%20Proprietary-brightgreen.svg?style=flat-square" alt="Engine" />
   <img src="https://img.shields.io/badge/Renderer-vitaGL%20%28GLES%202.0%29-orange.svg?style=flat-square" alt="Renderer" />
-  <img src="https://img.shields.io/badge/Status-Playable-success.svg?style=flat-square" alt="Status: Playable" />
+  <img src="https://img.shields.io/badge/Status-Playable-success.svg?style=flat-square" alt="Status" />
+</p>
+
+<p align="center">
+  <a href="#-description">Description</a> •
+  <a href="#-features">Features</a> •
+  <a href="#-controls">Controls</a> •
+  <a href="#-installation">Installation</a> •
+  <a href="#-known-issues">Known Issues</a> •
+  <a href="#-building-from-source">Build</a> •
+  <a href="#-credits">Credits</a>
 </p>
 
 ---
@@ -28,40 +38,54 @@ ARM Cortex-A9 processor, using a dynamic loader (*soloader*) and an Android envi
 emulation layer (*FalsoJNI*), with [vitaGL](https://github.com/Rinnegatamante/vitaGL)
 providing the GLES 2.0 rendering backend.
 
-### 🎮 Current Status: Playable
+---
 
-The game **is fully playable from start to finish at a smooth 60 FPS**. See
-[`port_progress.md`](port_progress.md) for the full bug-by-bug history.
+## 🎮 Status & Playability
 
-### ✨ What Works
+**Status: Playable** — the game is fully playable from start to finish at a smooth 60 FPS (as stated in the port
+notes; no measurement is recorded in this README). The most recent version referenced in these notes is v1.2.5.
+See [`port_progress.md`](port_progress.md) for the full bug-by-bug history.
 
-- **Native ARM Execution**: `libshadowguardian.so` (armeabi-v7a) runs directly on the
-  Vita's CPU via the soloader, no interpretation/emulation of game code.
-  (`libStormGLOFT.so`, Gameloft's runtime OpenGL hooker, is intentionally omitted —
-  vitaGL handles rendering instead.)
-- **Boots to Title + In-Game**: Full JNI lifecycle bootstrap matching the real Android
-  `Activity` order (`JNI_OnLoad` → `nativeGetInfo` → `GLResLoader.nativeInit` →
-  `Device.nativeInit` → `GameRenderer.nativeInit` → `ShadowGuardian.nativeInit` →
-  `GameRenderer.nativeResize`), then a continuous `GameRenderer.nativeRender()` loop.
-- **vitaGL Graphics Pipeline**: GLES 2.0 rendering through a natively built vitaGL
-  (built from `lib/vitagl`, with error-handling guards kept enabled so the engine's
-  bloom/blur render-target setup behaves like real drivers instead of crashing).
-- **Audio**: The engine's Vox software mixer output is routed to Vita's PCM audio
-  (`sceAudioOut`, 44100 Hz stereo, double-buffered mixer on core 1). Music and SFX
-  work, including loop/pitch/volume/stop commands.
-- **Input**: Touch controls plus mapped physical buttons and both analog sticks.
-  Touch is forwarded to `GameGLSurfaceView.nativeOnTouch`; keys go through
-  `ShadowGuardian.nativeOnKeyDown/Up`.
-- **Assets from `ux0:`**: Path redirection maps the engine's
-  `/sdcard/gameloft/games/GloftSGHP` and `/data/data/...` paths to
-  `ux0:data/shadowguardian/`.
-- **DRM bypassed**: Gameloft license check (`ALicenseCheck_ValidateLicense`) is patched out.
-- **Shader fixes bundled**: The 3 engine shaders Android drivers silently tolerate but
-  Shark does not (`interactible_basic.xml`, `interactible_bump.xml`,
-  `interactible_shadowmap.xml`) ship inside the VPK under `shader_patches/` and are
-  installed automatically on boot — no manual file swapping needed.
+- [x] **Native ARM execution**: `libshadowguardian.so` (armeabi-v7a) runs directly on the Vita's CPU via the soloader. `libStormGLOFT.so` (Gameloft's runtime OpenGL hooker) is intentionally omitted, since vitaGL handles rendering instead.
+- [x] **Boot to title and in-game**: full JNI lifecycle bootstrap matching the real Android `Activity` order (`JNI_OnLoad` → `nativeGetInfo` → `GLResLoader.nativeInit` → `Device.nativeInit` → `GameRenderer.nativeInit` → `ShadowGuardian.nativeInit` → `GameRenderer.nativeResize`), then a continuous `GameRenderer.nativeRender()` loop.
+- [x] **Camera**: right-stick free-look with smooth drag; continuous drag was confirmed on hardware in a later build (`port_progress.md`, Mejora #33). *Verified on console.*
+- [x] **Graphics**: GLES 2.0 through a natively built vitaGL (built from `lib/vitagl`), with error-handling guards kept enabled so the engine's bloom/blur render-target setup behaves like real drivers instead of crashing.
+- [x] **Audio**: the engine's Vox software mixer is routed to `sceAudioOut` (44100 Hz stereo, double-buffered mixer on core 1). Music and SFX work, including loop/pitch/volume/stop commands.
+- [x] **Input**: touch controls plus mapped physical buttons and both analog sticks.
+- [x] **Assets**: path redirection maps the engine's `/sdcard/gameloft/games/GloftSGHP` and `/data/data/...` paths to `ux0:data/shadowguardian/`.
+- [x] **DRM**: Gameloft license check (`ALicenseCheck_ValidateLicense`) is patched out.
+- [x] **Shader fixes**: the 3 engine shaders that Android drivers tolerate but Shark does not ship inside the VPK under `shader_patches/` and are installed automatically on boot.
 
-### 🕹️ Controls
+### 🔧 Changelog (v1.2.x)
+
+- **Shader cache history**: three different-looking crashes across v1.2.1–v1.2.5 turned out to be one root cause (the `interactible_*` shaders above failing to compile on Shark, plus vitaGL's on-disk cache reader/writer not tolerating failed compiles). All three layers are fixed as of v1.2.5: cache reads tolerate corrupt files, failed compiles are never written to the cache, and the corrected shaders ship in the VPK.
+
+---
+
+## ✨ Features
+
+| Feature | Status | Notes |
+| :--- | :---: | :--- |
+| Boots to gameplay | ✅ | Title and in-game; the port notes describe the game as fully playable |
+| Graphics / renderer | ✅ | vitaGL, GLES 2.0; bloom/blur render-target guards kept enabled |
+| Audio & music | ✅ | Vox mixer to `sceAudioOut`; music and SFX with loop/pitch/volume/stop |
+| Video / cutscenes | ✅ | Video assets are loaded from `video/` in the game data |
+| Physical buttons | ✅ | Mapped as in the Controls table below |
+| Analog sticks / camera | ✅ | Right stick free-look camera; left stick movement; sensitivity adjustable |
+| Touch screen | ✅ | Original touch controls; virtual buttons can be hidden with Select |
+| Button remapping / port menu | ➖ | No remapping menu; Select + D-Pad Up / Down adjusts camera sensitivity |
+| Save data | 🧪 | Not documented in this README |
+| Native trophies | ➖ | Not documented in this port |
+| Languages | ➖ | Not documented in this port |
+| Performance | 🧪 | Stated as 60 FPS in the port notes; no measurement recorded in this README |
+| Online / IAP / ads | ➖ | Gameloft license check is patched out; online features are not documented |
+| PS TV | 🧪 | Listed in the platform badge; no separate PS TV test recorded |
+
+Legend: `✅ Working (verified on console) · 🧪 Implemented, not yet verified on console · 🟡 Partial · ❌ Not working · ➖ Not applicable · ❔ Not documented yet`
+
+---
+
+## 🎯 Controls
 
 | Vita input | Action |
 |---|---|
@@ -77,17 +101,6 @@ The game **is fully playable from start to finish at a smooth 60 FPS**. See
 | Start | Pause / back |
 | Select (tap) | Toggle virtual buttons (hide/show touch controls) |
 | Touch screen | Original touch controls |
-
-### ⚠️ Known Issues
-
-- **Shader cache history**: three different-looking crashes across v1.2.1–v1.2.5 turned
-  out to be one root cause (the `interactible_*` shaders above failing to compile on
-  Shark, plus vitaGL's on-disk cache reader/writer not tolerating failed compiles).
-  All three layers are fixed as of v1.2.5 — cache reads tolerate corrupt files, failed
-  compiles are never written to the cache, and the corrected shaders ship in the VPK.
-- **Beta bugs**: occasional UI quirks may remain — see the bug log in
-  [`port_progress.md`](port_progress.md). If you hit one, grab a console log
-  (`ux0:data/shadowguardian/logs/`): it is the fastest way to trace it instead of guessing.
 
 ---
 
@@ -108,7 +121,7 @@ To run this port on your PS Vita or PS TV, you will need:
 
 ---
 
-## 📦 Installation Instructions
+## 📦 Installation
 
 1. Install the `shadowguardian.vpk` file on your console using **VitaShell**.
 2. On your PC, extract `Shadow-Guardian-HD-v1-0-1-UK-RU.apk` with any zip extractor
@@ -132,13 +145,23 @@ ux0:data/shadowguardian/
 ├── res/ shaders/ text/    <- Game data folders from the APK / data dump
 ├── music/ sounds/ models/ <- (anims, collisions, textures, video, levels,
 │                              gui_1_6, gui_1_7, sprites_1_6, sprites_1_7, ...)
+├── camera_sens.txt        <- Camera sensitivity (created by Select + D-Pad Up / Down)
 ├── logs/                  <- Incremental debug logs (shadowguardian_NNN.log)
 └── cg/ glsl/              <- Shader cache (created at runtime/build)
 ```
 
 ---
 
-## 🛠️ Building from Source
+## 🐛 Known Issues
+
+- **Beta bugs**: occasional UI quirks may remain — see the bug log in
+  [`port_progress.md`](port_progress.md). If you hit one, grab a console log
+  (`ux0:data/shadowguardian/logs/`): it is the fastest way to trace it instead of guessing.
+- **Crash dumps** are written by the system to `ux0:data/` (not to the game folder).
+
+---
+
+## 🔨 Building from Source
 
 This port does **not** keep a local copy of `porting_tools/` — all build, deploy,
 log, LiveArea, and crash-dump workflows are handled by **psvita-port-toolkit**, a
@@ -162,7 +185,7 @@ crash-dump parsing), use **psvita-port-toolkit** instead of raw `cmake`/`make`.
 
 ---
 
-## 🏗️ Project Structure
+## 📁 Project Structure
 
 - `source/`: Native C/C++ loader (lifecycle, GLES rendering, audio, input, JNI
   resource loader, video, path/license patches).
@@ -176,7 +199,7 @@ crash-dump parsing), use **psvita-port-toolkit** instead of raw `cmake`/`make`.
 
 ---
 
-## ⚖️ Disclaimer
+## 📜 Disclaimer
 
 **Shadow Guardian** is a registered trademark of Gameloft. The work presented in this
 repository is not "official" or produced or sanctioned by Gameloft or any other
@@ -211,7 +234,7 @@ This project is **free** and will stay free. If you enjoy it, a tip from **$1** 
 
 ---
 
-## 👥 Credits and Acknowledgements
+## 👥 Credits
 
 - **Gameloft**: Original developers of Shadow Guardian.
 - **TheFloW**: For `so_util`, `kubridge`, `FdFix`, and foundational techniques for
@@ -222,7 +245,7 @@ This project is **free** and will stay free. If you enjoy it, a tip from **$1** 
 
 ---
 
-## License
+## 📄 License
 
 This software may be modified and distributed under the terms of the MIT license.
 See the [LICENSE](LICENSE) file for details.
